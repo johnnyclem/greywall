@@ -84,6 +84,21 @@ changelog:
     - title: Other work
       order: 9999
 
+homebrew_casks:
+  - repository:
+      owner: GreyhavenHQ
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/GreyhavenHQ/greywall"
+    description: "Sandboxed command execution with network isolation"
+    license: "Apache-2.0"
+    binaries:
+      - greywall
+    dependencies:
+      - cask: greyproxy
+    caveats: |
+      Run 'greywall setup' to start the greyproxy service.
+
 release:
   draft: false
   prerelease: auto

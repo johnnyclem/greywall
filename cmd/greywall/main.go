@@ -459,11 +459,24 @@ func runCheck(_ *cobra.Command, _ []string) error {
 	steps := sandbox.PrintDependencyStatus()
 
 	status := proxy.Detect()
+	brewManaged := proxy.IsBrewManaged(status.Path)
+
+	installHint := "greywall setup"
+	upgradeHint := "greywall setup"
+	if brewManaged {
+		upgradeHint = "brew upgrade greyproxy"
+	} else if selfPath, err := os.Executable(); err == nil && proxy.IsBrewManaged(selfPath) {
+		installHint = "brew install greyproxy"
+	}
+
 	if status.Installed {
 		if status.Version != "" {
 			fmt.Println(sandbox.CheckOK(fmt.Sprintf("greyproxy (v%s)", status.Version)))
 		} else {
 			fmt.Println(sandbox.CheckOK("greyproxy"))
+		}
+		if brewManaged {
+			fmt.Println(sandbox.CheckOK("greyproxy installed via Homebrew"))
 		}
 		if status.Running {
 			fmt.Println(sandbox.CheckOK("greyproxy running (SOCKS5 :43052, DNS :43053)"))
@@ -475,13 +488,13 @@ func runCheck(_ *cobra.Command, _ []string) error {
 		if latest, err := proxy.CheckLatestVersion(); err == nil {
 			if proxy.IsOlderVersion(status.Version, latest) {
 				fmt.Println(sandbox.CheckFail(fmt.Sprintf("greyproxy up-to-date (v%s available, installed v%s)", latest, status.Version)))
-				steps = append(steps, "greywall setup")
+				steps = append(steps, upgradeHint)
 			}
 		}
 	} else {
 		fmt.Println(sandbox.CheckFail("greyproxy"))
 		fmt.Println(sandbox.CheckFail("greyproxy running"))
-		steps = append(steps, "greywall setup")
+		steps = append(steps, installHint)
 	}
 
 	if len(steps) > 0 {
@@ -533,7 +546,12 @@ func runSetup(_ *cobra.Command, _ []string) error {
 			return nil
 		}
 		if proxy.IsOlderVersion(status.Version, latest) {
-			fmt.Printf("greyproxy update available: v%s → v%s\n", status.Version, latest)
+			fmt.Printf("greyproxy update available: v%s -> v%s\n", status.Version, latest)
+			if proxy.IsBrewManaged(status.Path) {
+				fmt.Printf("greyproxy is managed by Homebrew. To update, run:\n")
+				fmt.Printf("  brew upgrade greyproxy\n")
+				return nil
+			}
 			fmt.Printf("Upgrading...\n")
 			return proxy.Install(proxy.InstallOptions{
 				Output: os.Stderr,
@@ -549,6 +567,13 @@ func runSetup(_ *cobra.Command, _ []string) error {
 			return err
 		}
 		fmt.Printf("greyproxy started.\n")
+		return nil
+	}
+
+	// Check if greywall itself was installed via brew; if so, suggest brew for greyproxy too.
+	if selfPath, err := os.Executable(); err == nil && proxy.IsBrewManaged(selfPath) {
+		fmt.Printf("greyproxy is not installed. Since greywall was installed via Homebrew, run:\n")
+		fmt.Printf("  brew install greyproxy\n")
 		return nil
 	}
 
