@@ -516,6 +516,47 @@ func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 	return args
 }
 
+// runIsolationArgs returns bwrap arguments for /run in defaultDenyRead mode.
+// Instead of bind-mounting the host's /run (which exposes dangerous sockets like
+// Docker, Podman, containerd, libvirt), we start with an empty tmpfs and
+// selectively mount only what's needed.
+func runIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
+	args := []string{"--tmpfs", "/run"}
+
+	// If /etc/resolv.conf is a symlink into /run (e.g., systemd-resolved
+	// points to /run/systemd/resolve/stub-resolv.conf), we need to make
+	// the target reachable inside the sandbox.
+	if extra := resolveSymlinkForBind("/etc/resolv.conf", debug); len(extra) > 0 {
+		// resolveSymlinkForBind may emit --tmpfs /run again (it detects /run as
+		// a separate mount). Since we already have --tmpfs /run, filter those out
+		// and only keep --dir and --ro-bind entries.
+		for i := 0; i < len(extra); i++ {
+			if extra[i] == "--tmpfs" && i+1 < len(extra) && extra[i+1] == "/run" {
+				i++ // skip both --tmpfs and /run
+				continue
+			}
+			args = append(args, extra[i])
+		}
+	}
+
+	// D-Bus session bus isolation: create /run/user/<uid> and optionally
+	// bind-mount the filtered D-Bus proxy socket.
+	uid := os.Getuid()
+	userRunDir := fmt.Sprintf("/run/user/%d", uid)
+
+	if dbusBridge != nil {
+		args = append(args, "--dir", userRunDir)
+		args = append(args, "--bind", dbusBridge.SocketPath, filepath.Join(userRunDir, "bus"))
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall:linux] /run isolated (tmpfs); D-Bus session bus filtered (only org.freedesktop.Notifications allowed)\n")
+		}
+	} else if debug {
+		fmt.Fprintf(os.Stderr, "[greywall:linux] /run isolated (tmpfs); D-Bus session bus blocked\n")
+	}
+
+	return args
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path) //nolint:gosec // internal paths only
 	return err == nil
@@ -686,7 +727,7 @@ func buildDenyByDefaultMounts(cfg *config.Config, cwd string, dbusBridge *DbusBr
 	// /bin, /sbin, /lib, /lib64 are often symlinks to /usr/*. We must
 	// recreate these as symlinks via --symlink so the dynamic linker
 	// and shell can be found. Real directories get bind-mounted.
-	systemPaths := []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/run"}
+	systemPaths := []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"}
 	for _, p := range systemPaths {
 		if !fileExists(p) {
 			continue
@@ -702,11 +743,11 @@ func buildDenyByDefaultMounts(cfg *config.Config, cwd string, dbusBridge *DbusBr
 		}
 	}
 
-	// Block D-Bus session bus to prevent sandbox escape via GVFS/gnome-keyring.
-	// /run/user/<uid>/bus exposes all host session services (file read via GVFS,
-	// password read via gnome-keyring, process launch via Flatpak portal).
-	// --tmpfs /run/user overlays the bind-mounted /run, hiding the D-Bus socket.
-	args = append(args, dbusIsolationArgs(dbusBridge, debug)...)
+	// /run: use an empty tmpfs and selectively mount only what's needed.
+	// Mounting all of /run exposes dangerous host sockets (Docker, Podman,
+	// containerd, libvirt, etc.) that allow sandbox escape even when
+	// read-only, since Unix socket connections bypass filesystem write checks.
+	args = append(args, runIsolationArgs(dbusBridge, debug)...)
 
 	// /sys needs to be accessible for system info
 	if fileExists("/sys") && canMountOver("/sys") {
@@ -1009,7 +1050,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// mounts like /run are empty, so the symlink target is unreachable and
 	// bwrap fails with "Can't create file at /etc/resolv.conf".
 	if !defaultDenyRead {
-		// In defaultDenyRead mode, /run is already explicitly mounted.
+		// In defaultDenyRead mode, resolv.conf symlink resolution is handled by runIsolationArgs.
 		if extra := resolveSymlinkForBind("/etc/resolv.conf", opts.Debug); len(extra) > 0 {
 			bwrapArgs = append(bwrapArgs, extra...)
 		}
