@@ -6,7 +6,10 @@ options:
 
 settings:
   base:
-    DEVELOPMENT_TEAM: 838A2BPKD9
+    DEVELOPMENT_TEAM: YOUR_TEAM_ID
+    CODE_SIGN_IDENTITY: "Apple Development"
+    CODE_SIGN_STYLE: Manual
+    PROVISIONING_PROFILE_SPECIFIER: ""
 
 targets:
   GreywallProxy:
@@ -23,7 +26,9 @@ targets:
       path: GreywallProxy/GreywallProxy.entitlements
     settings:
       base:
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development"
+        PROVISIONING_PROFILE_SPECIFIER: ""
         PRODUCT_BUNDLE_IDENTIFIER: io.greywall.proxy
         SWIFT_VERSION: "5.9"
     dependencies:
@@ -46,6 +51,8 @@ targets:
       path: GreywallProxyExtension/GreywallProxyExtension.entitlements
     settings:
       base:
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development"
+        PROVISIONING_PROFILE_SPECIFIER: ""
         PRODUCT_BUNDLE_IDENTIFIER: io.greywall.proxy.extension
         SWIFT_VERSION: "5.9"

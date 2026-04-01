@@ -58,7 +58,7 @@ class TransparentProxyProvider: NETransparentProxyProvider {
         completionHandler()
     }
 
-    // MARK: - Flow handling (Step 1: passive logging, all passthrough)
+    // MARK: - Flow handling (Step 1: passive logging with passthrough)
 
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         let meta = flow.metaData
@@ -70,12 +70,110 @@ class TransparentProxyProvider: NETransparentProxyProvider {
             let endpoint = tcpFlow.remoteEndpoint as? NWHostEndpoint
             let dest = endpoint.map { "\($0.hostname):\($0.port)" } ?? "<unknown>"
             log.info("TCP flow: pid=\(pid) app=\(signingID) host=\(hostname) dest=\(dest)")
-        } else if flow is NEAppProxyUDPFlow {
+            // Open the TCP flow and pipe data through transparently
+            tcpFlow.open(withLocalEndpoint: nil) { error in
+                if let error {
+                    self.log.error("TCP open failed: \(error.localizedDescription)")
+                    return
+                }
+                self.pipeTC(tcpFlow)
+            }
+        } else if let udpFlow = flow as? NEAppProxyUDPFlow {
             log.info("UDP flow: pid=\(pid) app=\(signingID) host=\(hostname)")
+            // Open the UDP flow and pipe datagrams through transparently
+            udpFlow.open(withLocalEndpoint: nil) { error in
+                if let error {
+                    self.log.error("UDP open failed: \(error.localizedDescription)")
+                    return
+                }
+                self.pipeUDP(udpFlow)
+            }
         }
 
-        // Step 1: passthrough everything -- just log and let it through
-        return false
+        return true
+    }
+
+    // MARK: - TCP passthrough
+
+    private func pipeTC(_ flow: NEAppProxyTCPFlow) {
+        // Read from app, write to network (outbound)
+        readTCPLoop(flow)
+        // Read from network, write to app (inbound)
+        writeTCPLoop(flow)
+    }
+
+    private func readTCPLoop(_ flow: NEAppProxyTCPFlow) {
+        flow.readData { data, error in
+            if let error {
+                self.log.debug("TCP read done: \(error.localizedDescription)")
+                flow.closeWriteWithError(error)
+                return
+            }
+            guard let data, !data.isEmpty else {
+                // EOF - close write direction
+                flow.closeWriteWithError(nil)
+                return
+            }
+            flow.write(data) { writeError in
+                if let writeError {
+                    self.log.debug("TCP write failed: \(writeError.localizedDescription)")
+                    flow.closeWriteWithError(writeError)
+                    return
+                }
+                // Continue reading
+                self.readTCPLoop(flow)
+            }
+        }
+    }
+
+    private func writeTCPLoop(_ flow: NEAppProxyTCPFlow) {
+        flow.readData { data, error in
+            if let error {
+                self.log.debug("TCP inbound read done: \(error.localizedDescription)")
+                flow.closeReadWithError(error)
+                return
+            }
+            guard let data, !data.isEmpty else {
+                flow.closeReadWithError(nil)
+                return
+            }
+            flow.write(data) { writeError in
+                if let writeError {
+                    self.log.debug("TCP inbound write failed: \(writeError.localizedDescription)")
+                    flow.closeReadWithError(writeError)
+                    return
+                }
+                self.writeTCPLoop(flow)
+            }
+        }
+    }
+
+    // MARK: - UDP passthrough
+
+    private func pipeUDP(_ flow: NEAppProxyUDPFlow) {
+        readUDPLoop(flow)
+    }
+
+    private func readUDPLoop(_ flow: NEAppProxyUDPFlow) {
+        flow.readDatagrams { datagrams, endpoints, error in
+            if let error {
+                self.log.debug("UDP read done: \(error.localizedDescription)")
+                flow.closeWriteWithError(error)
+                return
+            }
+            guard let datagrams, let endpoints, !datagrams.isEmpty else {
+                flow.closeWriteWithError(nil)
+                return
+            }
+            flow.writeDatagrams(datagrams, sentBy: endpoints) { writeError in
+                if let writeError {
+                    self.log.debug("UDP write failed: \(writeError.localizedDescription)")
+                    flow.closeWriteWithError(writeError)
+                    return
+                }
+                self.readUDPLoop(flow)
+            }
+        }
     }
 
     // MARK: - Helpers

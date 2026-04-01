@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		44CC625444775C4BB2A70C24 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D079FFE5AE6F519A7AFD9372 /* AppDelegate.swift */; };
 		628BD2D557CA3BA9F1E6ACD6 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0EAEF3B146DDBF1DBCECDB8 /* main.swift */; };
+		733ECBF58464CD41A774B814 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B3E380B39F469A50390B3B7 /* main.swift */; };
 		9BA78AAB5B1D2935983C44B0 /* TransparentProxyProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB9704CA96189719C2D2F18 /* TransparentProxyProvider.swift */; };
 		AC6EB27AADEE57014762E44D /* GreywallProxyExtension.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 2C3964E5E1907EAA983B4519 /* GreywallProxyExtension.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -44,6 +45,7 @@
 		6403760430F25B5EBDE0D974 /* GreywallProxy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GreywallProxy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8D9862A9F547E84A7ABF1D46 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		964ADA16A4D09D58A413FE4E /* GreywallProxy.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GreywallProxy.entitlements; sourceTree = "<group>"; };
+		9B3E380B39F469A50390B3B7 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		D079FFE5AE6F519A7AFD9372 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EC2FC3507BB25AA6679B2BF4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F0EAEF3B146DDBF1DBCECDB8 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -76,6 +78,7 @@
 				D079FFE5AE6F519A7AFD9372 /* AppDelegate.swift */,
 				964ADA16A4D09D58A413FE4E /* GreywallProxy.entitlements */,
 				8D9862A9F547E84A7ABF1D46 /* Info.plist */,
+				9B3E380B39F469A50390B3B7 /* main.swift */,
 			);
 			path = GreywallProxy;
 			sourceTree = "<group>";
@@ -138,12 +141,12 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					4D9A2568262FD611BC23520F = {
-						DevelopmentTeam = 838A2BPKD9;
-						ProvisioningStyle = Automatic;
+						DevelopmentTeam = YOUR_TEAM_ID;
+						ProvisioningStyle = Manual;
 					};
 					70802F11EAB5387393A3E7D9 = {
-						DevelopmentTeam = 838A2BPKD9;
-						ProvisioningStyle = Automatic;
+						DevelopmentTeam = YOUR_TEAM_ID;
+						ProvisioningStyle = Manual;
 					};
 				};
 			};
@@ -173,6 +176,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				44CC625444775C4BB2A70C24 /* AppDelegate.swift in Sources */,
+				733ECBF58464CD41A774B814 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -229,9 +233,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 838A2BPKD9;
+				DEVELOPMENT_TEAM = YOUR_TEAM_ID;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -253,6 +259,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -264,7 +271,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = GreywallProxyExtension/GreywallProxyExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = GreywallProxyExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -272,6 +280,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.greywall.proxy.extension;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};
@@ -310,9 +319,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 838A2BPKD9;
+				DEVELOPMENT_TEAM = YOUR_TEAM_ID;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -327,6 +338,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -338,7 +350,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = GreywallProxyExtension/GreywallProxyExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = GreywallProxyExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -346,6 +359,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.greywall.proxy.extension;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};
@@ -356,7 +370,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = GreywallProxy/GreywallProxy.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = GreywallProxy/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -364,6 +379,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.greywall.proxy;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};
@@ -374,7 +390,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = GreywallProxy/GreywallProxy.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = GreywallProxy/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -382,6 +399,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.greywall.proxy;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};
