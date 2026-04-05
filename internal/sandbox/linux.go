@@ -485,6 +485,51 @@ func (b *DbusBridge) Cleanup() {
 	}
 }
 
+// audioSocketArgs returns bwrap arguments to expose PulseAudio and PipeWire
+// sockets inside a sandbox that has a tmpfs over /run/user. Audio tools
+// (piper, kokoro, aplay, paplay, etc.) need these sockets to reach the host
+// audio server; /dev/snd alone is not sufficient on systems using PulseAudio
+// or PipeWire as the audio abstraction layer.
+//
+// userRunDirCreated must be true if a --dir userRunDir entry was already added
+// to the argument list before this call, so this function knows whether it
+// needs to emit the --dir entry itself.
+func audioSocketArgs(userRunDir string, userRunDirCreated bool, debug bool) []string {
+	var args []string
+	madeUserRunDir := userRunDirCreated
+
+	// PulseAudio socket lives in a subdirectory: /run/user/<uid>/pulse/native
+	pulseDir := filepath.Join(userRunDir, "pulse")
+	pulseSocket := filepath.Join(pulseDir, "native")
+	if fileExists(pulseSocket) {
+		if !madeUserRunDir {
+			args = append(args, "--dir", userRunDir)
+			madeUserRunDir = true
+		}
+		args = append(args, "--dir", pulseDir)
+		args = append(args, "--bind", pulseSocket, pulseSocket)
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall:linux] Audio: PulseAudio socket exposed (%s)\n", pulseSocket)
+		}
+	}
+
+	// PipeWire socket: /run/user/<uid>/pipewire-0
+	pipewireSocket := filepath.Join(userRunDir, "pipewire-0")
+	if fileExists(pipewireSocket) {
+		if !madeUserRunDir {
+			args = append(args, "--dir", userRunDir)
+			madeUserRunDir = true
+		}
+		args = append(args, "--bind", pipewireSocket, pipewireSocket)
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall:linux] Audio: PipeWire socket exposed (%s)\n", pipewireSocket)
+		}
+	}
+
+	_ = madeUserRunDir // consumed above; silence unused-variable linter
+	return args
+}
+
 // dbusIsolationArgs returns bwrap arguments to block the D-Bus session bus.
 // The D-Bus session socket at /run/user/<uid>/bus allows sandboxed processes to
 // communicate with host services (GVFS for arbitrary file reads, gnome-keyring
@@ -493,8 +538,10 @@ func (b *DbusBridge) Cleanup() {
 // If a DbusBridge is provided, its filtered socket is bind-mounted as the session
 // bus, allowing only org.freedesktop.Notifications (notify-send).
 //
-// This also blocks SSH agent, GPG agent, Wayland, PipeWire, and other sockets
-// under /run/user/. SSH/GPG can be re-added via allowRead in the config if needed.
+// Audio sockets (PulseAudio, PipeWire) are re-exposed so that commands running
+// inside the sandbox can produce audio output.
+// SSH/GPG agents and Wayland are still blocked; they can be re-added via
+// allowRead in the config if needed.
 func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 	if !fileExists("/run/user") {
 		return nil
@@ -505,10 +552,12 @@ func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 
 	args := []string{"--tmpfs", "/run/user"}
 
+	userRunDirCreated := false
 	// If we have a filtered D-Bus proxy, bind-mount it as the session bus socket
 	// so notify-send works while everything else (GVFS, keyring, etc.) is blocked
 	if dbusBridge != nil {
 		args = append(args, "--dir", userRunDir)
+		userRunDirCreated = true
 		args = append(args, "--bind", dbusBridge.SocketPath, filepath.Join(userRunDir, "bus"))
 		if debug {
 			fmt.Fprintf(os.Stderr, "[greywall:linux] D-Bus session bus filtered (only org.freedesktop.Notifications allowed)\n")
@@ -516,6 +565,9 @@ func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 	} else if debug {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] D-Bus session bus isolated (--tmpfs /run/user)\n")
 	}
+
+	// Re-expose audio sockets so sandboxed processes can produce audio output.
+	args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
 
 	return args
 }
@@ -548,8 +600,10 @@ func runIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 	uid := os.Getuid()
 	userRunDir := fmt.Sprintf("/run/user/%d", uid)
 
+	userRunDirCreated := false
 	if dbusBridge != nil {
 		args = append(args, "--dir", userRunDir)
+		userRunDirCreated = true
 		args = append(args, "--bind", dbusBridge.SocketPath, filepath.Join(userRunDir, "bus"))
 		if debug {
 			fmt.Fprintf(os.Stderr, "[greywall:linux] /run isolated (tmpfs); D-Bus session bus filtered (only org.freedesktop.Notifications allowed)\n")
@@ -557,6 +611,9 @@ func runIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 	} else if debug {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] /run isolated (tmpfs); D-Bus session bus blocked\n")
 	}
+
+	// Re-expose audio sockets so sandboxed processes can produce audio output.
+	args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
 
 	return args
 }
