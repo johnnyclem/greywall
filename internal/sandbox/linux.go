@@ -130,6 +130,10 @@ type LinuxSandboxOptions struct {
 	// credential-substituted content. When set, these files are bind-mounted
 	// read-only instead of being masked with an empty file.
 	RewrittenEnvFiles map[string]string
+	// AllowAudio exposes PulseAudio and PipeWire sockets so sandboxed processes
+	// can produce audio output. Disabled by default because these sockets also
+	// allow microphone capture and (via PipeWire) camera/screen access.
+	AllowAudio bool
 }
 
 // NewProxyBridge creates a Unix socket bridge to an external SOCKS5 proxy.
@@ -491,6 +495,9 @@ func (b *DbusBridge) Cleanup() {
 // audio server; /dev/snd alone is not sufficient on systems using PulseAudio
 // or PipeWire as the audio abstraction layer.
 //
+// Security note: these sockets also allow microphone capture and, via PipeWire,
+// camera/screen access. Only call this when AllowAudio is explicitly set.
+//
 // userRunDirCreated must be true if a --dir userRunDir entry was already added
 // to the argument list before this call, so this function knows whether it
 // needs to emit the --dir entry itself.
@@ -538,11 +545,10 @@ func audioSocketArgs(userRunDir string, userRunDirCreated bool, debug bool) []st
 // If a DbusBridge is provided, its filtered socket is bind-mounted as the session
 // bus, allowing only org.freedesktop.Notifications (notify-send).
 //
-// Audio sockets (PulseAudio, PipeWire) are re-exposed so that commands running
-// inside the sandbox can produce audio output.
+// When allowAudio is true, PulseAudio and PipeWire sockets are also re-exposed.
 // SSH/GPG agents and Wayland are still blocked; they can be re-added via
 // allowRead in the config if needed.
-func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
+func dbusIsolationArgs(dbusBridge *DbusBridge, allowAudio bool, debug bool) []string {
 	if !fileExists("/run/user") {
 		return nil
 	}
@@ -566,8 +572,11 @@ func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] D-Bus session bus isolated (--tmpfs /run/user)\n")
 	}
 
-	// Re-expose audio sockets so sandboxed processes can produce audio output.
-	args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
+	// Re-expose audio sockets only when explicitly opted in (allowAudio: true).
+	// These sockets also allow microphone capture and screen access via PipeWire.
+	if allowAudio {
+		args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
+	}
 
 	return args
 }
@@ -576,7 +585,7 @@ func dbusIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 // Instead of bind-mounting the host's /run (which exposes dangerous sockets like
 // Docker, Podman, containerd, libvirt), we start with an empty tmpfs and
 // selectively mount only what's needed.
-func runIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
+func runIsolationArgs(dbusBridge *DbusBridge, allowAudio bool, debug bool) []string {
 	args := []string{"--tmpfs", "/run"}
 
 	// If /etc/resolv.conf is a symlink into /run (e.g., systemd-resolved
@@ -612,8 +621,11 @@ func runIsolationArgs(dbusBridge *DbusBridge, debug bool) []string {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] /run isolated (tmpfs); D-Bus session bus blocked\n")
 	}
 
-	// Re-expose audio sockets so sandboxed processes can produce audio output.
-	args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
+	// Re-expose audio sockets only when explicitly opted in (allowAudio: true).
+	// These sockets also allow microphone capture and screen access via PipeWire.
+	if allowAudio {
+		args = append(args, audioSocketArgs(userRunDir, userRunDirCreated, debug)...)
+	}
 
 	return args
 }
@@ -826,7 +838,7 @@ func buildDenyByDefaultMounts(cfg *config.Config, cwd string, dbusBridge *DbusBr
 	// Mounting all of /run exposes dangerous host sockets (Docker, Podman,
 	// containerd, libvirt, etc.) that allow sandbox escape even when
 	// read-only, since Unix socket connections bypass filesystem write checks.
-	args = append(args, runIsolationArgs(dbusBridge, debug)...)
+	args = append(args, runIsolationArgs(dbusBridge, cfg != nil && cfg.AllowAudio, debug)...)
 
 	// /sys needs to be accessible for system info
 	if fileExists("/sys") && canMountOver("/sys") {
@@ -1096,7 +1108,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		// Block D-Bus session bus even in learning mode to prevent sandbox escape
 		// via GVFS/gnome-keyring. dconf and Wayland still work since they use
 		// their own sockets, not the D-Bus session bus.
-		bwrapArgs = append(bwrapArgs, dbusIsolationArgs(dbusBridge, opts.Debug)...)
+		bwrapArgs = append(bwrapArgs, dbusIsolationArgs(dbusBridge, opts.AllowAudio, opts.Debug)...)
 
 	}
 
@@ -1115,7 +1127,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		// Legacy mode: bind entire root filesystem read-only
 		bwrapArgs = append(bwrapArgs, "--ro-bind", "/", "/")
 		// Block D-Bus session bus to prevent sandbox escape via GVFS/gnome-keyring
-		bwrapArgs = append(bwrapArgs, dbusIsolationArgs(dbusBridge, opts.Debug)...)
+		bwrapArgs = append(bwrapArgs, dbusIsolationArgs(dbusBridge, opts.AllowAudio, opts.Debug)...)
 	}
 
 	// Mount special filesystems
