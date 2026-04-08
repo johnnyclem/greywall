@@ -44,6 +44,25 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 		return nil // Graceful fallback
 	}
 
+	// In relaxed mode, allow read+write on the entire filesystem.
+	// Mandatory deny is enforced by bwrap mount overlays, not Landlock.
+	relaxedMode := cfg != nil && cfg.Filesystem.IsRelaxed()
+	if relaxedMode {
+		if err := ruleset.AllowReadWrite("/"); err != nil && debug {
+			fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add root read/write path: %v\n", err)
+		}
+		if err := ruleset.Apply(); err != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[greywall:landlock] Failed to apply: %v\n", err)
+			}
+			return nil
+		}
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall:landlock] Applied relaxed restrictions (ABI v%d)\n", features.LandlockABI)
+		}
+		return nil
+	}
+
 	// Essential system paths - allow read+execute
 	// Note: /dev is handled separately with read+write for /dev/null, /dev/zero, etc.
 	systemReadPaths := []string{

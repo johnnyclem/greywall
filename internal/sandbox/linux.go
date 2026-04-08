@@ -1044,10 +1044,19 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	}
 
 	defaultDenyRead := cfg != nil && cfg.Filesystem.IsDefaultDenyRead()
+	relaxedMode := cfg != nil && cfg.Filesystem.IsRelaxed()
 
 	switch {
 	case opts.Learning:
 		// Skip defaultDenyRead logic in learning mode (already set up above)
+	case relaxedMode:
+		// Relaxed mode: bind entire root filesystem read-write, mandatory deny lists still enforced
+		if opts.Debug {
+			fmt.Fprintf(os.Stderr, "[greywall:linux] Relaxed mode enabled - read-write root with mandatory deny overlays\n")
+		}
+		bwrapArgs = append(bwrapArgs, "--bind", "/", "/")
+		// Block D-Bus session bus to prevent sandbox escape via GVFS/gnome-keyring
+		bwrapArgs = append(bwrapArgs, dbusIsolationArgs(dbusBridge, opts.Debug)...)
 	case defaultDenyRead:
 		// Deny-by-default mode: start with empty root, then whitelist system paths + CWD
 		if opts.Debug {
@@ -1081,8 +1090,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// /mnt/wsl/resolv.conf). After --ro-bind / / (non-recursive), separate
 	// mounts like /run are empty, so the symlink target is unreachable and
 	// bwrap fails with "Can't create file at /etc/resolv.conf".
-	if !defaultDenyRead {
+	if !defaultDenyRead || relaxedMode {
 		// In defaultDenyRead mode, resolv.conf symlink resolution is handled by runIsolationArgs.
+		// In relaxed mode, we use --bind / / (like legacy), so symlink resolution is needed.
 		if extra := resolveSymlinkForBind("/etc/resolv.conf", opts.Debug); len(extra) > 0 {
 			bwrapArgs = append(bwrapArgs, extra...)
 		}
@@ -1092,37 +1102,41 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// (the sandbox is already permissive with home + cwd writable)
 	if !opts.Learning {
 
-		writablePaths := make(map[string]bool)
+		// In relaxed mode, root is already writable so skip explicit writable paths.
+		// In other modes, we need to make specific paths writable.
+		if !relaxedMode {
+			writablePaths := make(map[string]bool)
 
-		// Add default write paths (system paths needed for operation)
-		for _, p := range GetDefaultWritePaths() {
-			// Skip /dev paths (handled by --dev) and /tmp paths (handled by --tmpfs)
-			if strings.HasPrefix(p, "/dev/") || strings.HasPrefix(p, "/tmp/") || strings.HasPrefix(p, "/private/tmp/") {
-				continue
-			}
-			writablePaths[p] = true
-		}
-
-		// Add user-specified allowWrite paths
-		if cfg != nil && cfg.Filesystem.AllowWrite != nil {
-			expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowWrite)
-			for _, p := range expandedPaths {
+			// Add default write paths (system paths needed for operation)
+			for _, p := range GetDefaultWritePaths() {
+				// Skip /dev paths (handled by --dev) and /tmp paths (handled by --tmpfs)
+				if strings.HasPrefix(p, "/dev/") || strings.HasPrefix(p, "/tmp/") || strings.HasPrefix(p, "/private/tmp/") {
+					continue
+				}
 				writablePaths[p] = true
 			}
 
-			// Add non-glob paths
-			for _, p := range cfg.Filesystem.AllowWrite {
-				normalized := NormalizePath(p)
-				if !ContainsGlobChars(normalized) {
-					writablePaths[normalized] = true
+			// Add user-specified allowWrite paths
+			if cfg != nil && cfg.Filesystem.AllowWrite != nil {
+				expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowWrite)
+				for _, p := range expandedPaths {
+					writablePaths[p] = true
+				}
+
+				// Add non-glob paths
+				for _, p := range cfg.Filesystem.AllowWrite {
+					normalized := NormalizePath(p)
+					if !ContainsGlobChars(normalized) {
+						writablePaths[normalized] = true
+					}
 				}
 			}
-		}
 
-		// Make writable paths actually writable (override read-only root)
-		for p := range writablePaths {
-			if fileExists(p) {
-				bwrapArgs = append(bwrapArgs, "--bind", p, p)
+			// Make writable paths actually writable (override read-only root)
+			for p := range writablePaths {
+				if fileExists(p) {
+					bwrapArgs = append(bwrapArgs, "--bind", p, p)
+				}
 			}
 		}
 
@@ -1175,9 +1189,38 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		// by buildDenyByDefaultMounts() (either masked with empty file or mounted
 		// with rewritten content). Skip them here to avoid overriding.
 		maskedPaths := make(map[string]bool)
-		if defaultDenyRead {
+		if defaultDenyRead && !relaxedMode {
 			for _, f := range SensitiveProjectFiles {
 				maskedPaths[filepath.Join(cwd, f)] = true
+			}
+		}
+
+		// In relaxed mode, sensitive project files (.env) need to be masked or
+		// rewritten just like in deny-by-default mode, since root is fully writable.
+		if relaxedMode && cwd != "" {
+			var emptyFile string
+			for _, f := range SensitiveProjectFiles {
+				p := filepath.Join(cwd, f)
+				if !fileExists(p) {
+					continue
+				}
+				maskedPaths[p] = true
+				if rewrittenPath, ok := opts.RewrittenEnvFiles[p]; ok {
+					bwrapArgs = append(bwrapArgs, "--ro-bind", rewrittenPath, p)
+					if opts.Debug {
+						fmt.Fprintf(os.Stderr, "[greywall:linux] Relaxed: mounting rewritten %s (credentials replaced with placeholders)\n", f)
+					}
+				} else {
+					if emptyFile == "" {
+						emptyFile = filepath.Join(os.TempDir(), "greywall", "empty")
+						_ = os.MkdirAll(filepath.Dir(emptyFile), 0o750)
+						_ = os.WriteFile(emptyFile, nil, 0o444) //nolint:gosec // intentionally world-readable empty file for bind-mount masking
+					}
+					bwrapArgs = append(bwrapArgs, "--ro-bind", emptyFile, p)
+					if opts.Debug {
+						fmt.Fprintf(os.Stderr, "[greywall:linux] Relaxed: masking sensitive file: %s\n", f)
+					}
+				}
 			}
 		}
 

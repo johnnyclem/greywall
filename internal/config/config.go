@@ -47,6 +47,7 @@ type NetworkConfig struct {
 // FilesystemConfig defines filesystem restrictions.
 type FilesystemConfig struct {
 	DefaultDenyRead *bool    `json:"defaultDenyRead,omitempty"` // If nil or true, deny reads by default except system paths, CWD, and AllowRead
+	Relaxed         *bool    `json:"relaxed,omitempty"`         // If true, allow all reads and writes except mandatory deny lists
 	AllowRead       []string `json:"allowRead"`                 // Paths to allow reading (used when DefaultDenyRead is true)
 	DenyRead        []string `json:"denyRead"`
 	AllowWrite      []string `json:"allowWrite"`
@@ -58,6 +59,13 @@ type FilesystemConfig struct {
 // Defaults to true when not explicitly set (nil).
 func (f *FilesystemConfig) IsDefaultDenyRead() bool {
 	return f.DefaultDenyRead == nil || *f.DefaultDenyRead
+}
+
+// IsRelaxed returns whether relaxed filesystem mode is enabled.
+// In relaxed mode, all reads and writes are allowed except mandatory deny lists
+// (dangerous files, sensitive project files, greyproxy keys, git hooks).
+func (f *FilesystemConfig) IsRelaxed() bool {
+	return f.Relaxed != nil && *f.Relaxed
 }
 
 // CommandConfig defines command restrictions.
@@ -460,8 +468,9 @@ func Merge(base, override *Config) *Config {
 		},
 
 		Filesystem: FilesystemConfig{
-			// Pointer field: override wins if set, otherwise base (nil = deny-by-default)
+			// Pointer fields: override wins if set, otherwise base
 			DefaultDenyRead: mergeOptionalBool(base.Filesystem.DefaultDenyRead, override.Filesystem.DefaultDenyRead),
+			Relaxed:         mergeOptionalBool(base.Filesystem.Relaxed, override.Filesystem.Relaxed),
 
 			// Append slices
 			AllowRead:  mergeStrings(base.Filesystem.AllowRead, override.Filesystem.AllowRead),

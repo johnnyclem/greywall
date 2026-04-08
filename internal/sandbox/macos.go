@@ -42,6 +42,7 @@ type MacOSSandboxParams struct {
 	AllowLocalBinding       bool
 	AllowLocalOutbound      bool
 	DefaultDenyRead         bool
+	Relaxed                 bool   // Allow all reads and writes except mandatory deny lists
 	Cwd                     string // Current working directory (for deny-by-default CWD allowlisting)
 	ReadAllowPaths          []string
 	ReadDenyPaths           []string
@@ -304,45 +305,50 @@ func generateReadRules(defaultDenyRead bool, cwd string, allowPaths, denyPaths [
 
 // generateWriteRules generates filesystem write rules for the sandbox profile.
 // When cwd is non-empty, it is automatically included in the write allow paths.
-func generateWriteRules(cwd string, allowPaths, denyPaths []string, allowGitConfig bool, logTag string) []string {
+func generateWriteRules(cwd string, allowPaths, denyPaths []string, allowGitConfig bool, relaxed bool, logTag string) []string {
 	var rules []string
 
-	// Auto-allow CWD for writes (project directory should be writable)
-	if cwd != "" {
-		rules = append(rules,
-			"(allow file-write*",
-			fmt.Sprintf("  (subpath %s)", escapePath(cwd)),
-			fmt.Sprintf("  (with message %q))", logTag),
-		)
-	}
-
-	// Allow TMPDIR parent on macOS
-	for _, tmpdirParent := range getTmpdirParent() {
-		normalized := NormalizePath(tmpdirParent)
-		rules = append(rules,
-			"(allow file-write*",
-			fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
-			fmt.Sprintf("  (with message %q))", logTag),
-		)
-	}
-
-	// Generate allow rules
-	for _, pathPattern := range allowPaths {
-		normalized := NormalizePath(pathPattern)
-
-		if ContainsGlobChars(normalized) {
-			regex := GlobToRegex(normalized)
+	if relaxed {
+		// Relaxed mode: allow all writes, then deny mandatory patterns
+		rules = append(rules, "(allow file-write*)")
+	} else {
+		// Auto-allow CWD for writes (project directory should be writable)
+		if cwd != "" {
 			rules = append(rules,
 				"(allow file-write*",
-				fmt.Sprintf("  (regex %s)", escapePath(regex)),
+				fmt.Sprintf("  (subpath %s)", escapePath(cwd)),
 				fmt.Sprintf("  (with message %q))", logTag),
 			)
-		} else {
+		}
+
+		// Allow TMPDIR parent on macOS
+		for _, tmpdirParent := range getTmpdirParent() {
+			normalized := NormalizePath(tmpdirParent)
 			rules = append(rules,
 				"(allow file-write*",
 				fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
 				fmt.Sprintf("  (with message %q))", logTag),
 			)
+		}
+
+		// Generate allow rules
+		for _, pathPattern := range allowPaths {
+			normalized := NormalizePath(pathPattern)
+
+			if ContainsGlobChars(normalized) {
+				regex := GlobToRegex(normalized)
+				rules = append(rules,
+					"(allow file-write*",
+					fmt.Sprintf("  (regex %s)", escapePath(regex)),
+					fmt.Sprintf("  (with message %q))", logTag),
+				)
+			} else {
+				rules = append(rules,
+					"(allow file-write*",
+					fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+					fmt.Sprintf("  (with message %q))", logTag),
+				)
+			}
 		}
 	}
 
@@ -644,14 +650,16 @@ func GenerateSandboxProfile(params MacOSSandboxParams) string {
 
 	// Read rules
 	profile.WriteString("; File read\n")
-	for _, rule := range generateReadRules(params.DefaultDenyRead, params.Cwd, params.ReadAllowPaths, params.ReadDenyPaths, params.RewrittenEnvFiles, logTag) {
+	// In relaxed mode, allow all reads (same as defaultDenyRead=false)
+	effectiveDenyRead := params.DefaultDenyRead && !params.Relaxed
+	for _, rule := range generateReadRules(effectiveDenyRead, params.Cwd, params.ReadAllowPaths, params.ReadDenyPaths, params.RewrittenEnvFiles, logTag) {
 		profile.WriteString(rule + "\n")
 	}
 	profile.WriteString("\n")
 
 	// Write rules
 	profile.WriteString("; File write\n")
-	for _, rule := range generateWriteRules(params.Cwd, params.WriteAllowPaths, params.WriteDenyPaths, params.AllowGitConfig, logTag) {
+	for _, rule := range generateWriteRules(params.Cwd, params.WriteAllowPaths, params.WriteDenyPaths, params.AllowGitConfig, params.Relaxed, logTag) {
 		profile.WriteString(rule + "\n")
 	}
 
@@ -731,6 +739,7 @@ func WrapCommandMacOS(cfg *config.Config, command string, exposedPorts []int, re
 		AllowLocalBinding:       allowLocalBinding,
 		AllowLocalOutbound:      allowLocalOutbound,
 		DefaultDenyRead:         cfg.Filesystem.IsDefaultDenyRead(),
+		Relaxed:                 cfg.Filesystem.IsRelaxed(),
 		Cwd:                     cwd,
 		ReadAllowPaths:          cfg.Filesystem.AllowRead,
 		ReadDenyPaths:           cfg.Filesystem.DenyRead,

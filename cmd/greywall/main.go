@@ -51,6 +51,7 @@ var (
 	secretVars             []string
 	ignoreVars             []string
 	skipVersionCheck       bool
+	relaxed                bool
 )
 
 func main() {
@@ -124,6 +125,7 @@ Configuration file format:
 	rootCmd.Flags().BoolVar(&learning, "learning", false, "Run in learning mode: trace filesystem access and generate a config profile")
 	rootCmd.Flags().StringVar(&profileName, "profile", "", "Load profiles by name, comma-separated (e.g. --profile claude,uv)")
 	rootCmd.Flags().BoolVar(&autoProfile, "auto-profile", false, "Use saved or built-in profile without prompting")
+	rootCmd.Flags().BoolVar(&relaxed, "relaxed", false, "Allow all filesystem reads and writes except mandatory deny lists (dangerous files, .env, git hooks)")
 	rootCmd.Flags().BoolVar(&noCredentialProtection, "no-credential-protection", false, "Disable credential substitution (real credentials visible in sandbox)")
 	rootCmd.Flags().StringArrayVar(&injectLabels, "inject", nil, "Inject a global credential by label (can be used multiple times, e.g. --inject ANTHROPIC_API_KEY)")
 	rootCmd.Flags().StringArrayVar(&secretVars, "secret", nil, "Protect an additional env var not in the default list (can be used multiple times)")
@@ -304,6 +306,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	}
 	if dnsAddr != "" {
 		cfg.Network.DnsAddr = dnsAddr
+	}
+
+	// --relaxed flag overrides config
+	if relaxed {
+		t := true
+		cfg.Filesystem.Relaxed = &t
 	}
 
 	// GreyProxy defaults: when no proxy or DNS is configured (neither via CLI
