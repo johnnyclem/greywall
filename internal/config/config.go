@@ -23,6 +23,7 @@ type Config struct {
 	SSH         SSHConfig        `json:"ssh"`
 	Credentials CredentialConfig `json:"credentials,omitempty"`
 	AllowPty    bool             `json:"allowPty,omitempty"`
+	AllowAudio  bool             `json:"allowAudio,omitempty"`
 }
 
 // CredentialConfig defines credential injection and protection settings.
