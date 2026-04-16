@@ -1,0 +1,43 @@
+# Example rules for `greywall fuse`.
+#
+# Matching is first-match-wins. Globs use doublestar (** = recursive).
+# Paths are matched against the absolute path on the backing filesystem,
+# so a backing of "/" and a request for /home/you/.ssh/id_rsa matches
+# the glob "**/.ssh/id_*".
+#
+# Caller is the resolved binary path from /proc/<pid>/exe of the
+# process that issued the FUSE operation.
+#
+# Supported ops: lookup, open, read, write, create, unlink, rmdir,
+# mkdir, rename, getattr. Ops is optional; empty = any op.
+
+default: allow
+
+rules:
+  # Allow git itself to do anything inside a .git directory.
+  - name: git-owns-dotgit
+    caller: "**/git"
+    path:   "**/.git/**"
+    action: allow
+
+  # Block anything else from reaching .git — including shells, claude,
+  # python scripts, etc. This produces a "deny" event and returns
+  # EACCES to the caller.
+  - name: non-git-blocked-from-dotgit
+    caller: "*"
+    path:   "**/.git/**"
+    action: deny
+
+  # Shield SSH private keys from every caller.
+  - name: block-ssh-private-keys
+    caller: "*"
+    path:   "**/.ssh/id_*"
+    ops:    [read, open, lookup, getattr]
+    action: deny
+
+  # Shield .env-style secret files.
+  - name: block-env-files
+    caller: "*"
+    path:   "**/.env*"
+    ops:    [read, open]
+    action: deny

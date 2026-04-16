@@ -148,6 +148,7 @@ Configuration file format:
 	rootCmd.AddCommand(newProfilesCmd())
 	rootCmd.AddCommand(newCheckCmd())
 	rootCmd.AddCommand(newSetupCmd())
+	rootCmd.AddCommand(newFuseCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
