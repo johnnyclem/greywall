@@ -156,7 +156,8 @@ greywall fuse \
 | `--mount` | `/tmp/greywall-fuse-$PID` | Where to mount; created if missing |
 | `--rules` | *(none)* | YAML rules file; if empty, `default=allow` and everything is logged |
 | `--observe-only` | `false` | Force every deny to `log`; nothing is ever blocked |
-| `--cwd` | *(derived)* | chdir target for the child command, interpreted inside the mount |
+| `--transparent` | `false` | Wrap child in a private user+mount namespace and chroot into the FUSE mount. Every absolute path the child resolves now goes through the hook layer. Rootless — requires kernel user namespace support. See *Transparent mode* below. |
+| `--cwd` | *(derived)* | chdir target for the child command |
 | `--events-file` | *(stdout)* | Write JSON events here instead of stdout |
 | `--debug` | `false` | Enable go-fuse's verbose protocol logging on stderr |
 
@@ -480,12 +481,101 @@ are:
 - `python3 -c "open('.git/HEAD').read()"` → `PermissionError`
 - `cat .ssh/id_rsa` → `Permission denied`, `rule=block-ssh-private-keys`
 
+## Transparent mode (`--transparent`)
+
+Without this flag, only paths physically under the FUSE mount are
+intercepted. A process can bypass the sandbox by resolving the real
+absolute path:
+
+```sh
+# non-transparent mode:
+python3 -c "open('/tmp/gw-test/.git/HEAD').read()"   # hits the mount
+python3 -c "open('/tmp/gw-test/.git/HEAD').read()"   # same, but:
+# ... if the process uses the BACKING path instead of the mount path,
+# FUSE never sees the call and the rule cannot fire.
+```
+
+With `--transparent`, greywall:
+
+1. Mounts the FUSE passthrough in the parent namespace (as before).
+2. `exec.Command` re-executes `greywall fuse-ns-setup` (a hidden
+   helper subcommand) with `SysProcAttr.Cloneflags = CLONE_NEWUSER |
+   CLONE_NEWNS` and a 1:1 uid/gid map so the helper runs as "root" in
+   its own user namespace. **No real root is required.**
+3. Inside the helper, before exec-ing the target:
+   - `mount("", "/", "", MS_REC|MS_PRIVATE, "")` — make root mount
+     propagation private so our new bind mounts do not leak back.
+   - Bind-mount the real `/proc`, `/sys`, `/dev` over the corresponding
+     paths inside the FUSE mount. Without this, `/proc/self`,
+     `/dev/tty`, etc. would be served by the FUSE daemon from the
+     parent's point of view, which is wrong for the child.
+   - `chroot(mountPoint)` so the child's `/` IS the FUSE mount.
+   - `chdir` into the target working directory.
+   - `execve` the user command.
+
+After this, the child sees `/home/tito/.ssh/id_rsa`, `/etc/shadow`,
+`/usr/lib/python3.14/...` — all as normal absolute paths — and every
+one of them routes through the FUSE hook layer. There is no "real
+path" to escape to, because the child's mount namespace is structured
+such that the only filesystem it can see (other than `/proc`, `/sys`,
+`/dev`) is the FUSE passthrough.
+
+### Why caller resolution needs extra care in transparent mode
+
+Two non-obvious issues, both now fixed in the implementation:
+
+1. **`/proc/<pid>/exe` from the parent namespace is mount-prefixed.**
+   The FUSE daemon lives outside the chroot. When it reads
+   `/proc/<child_pid>/exe`, the kernel reconstructs the symlink target
+   using the **reader's** mount namespace, which has the FUSE mount at
+   `/tmp/gw-mount`. So the result is
+   `/tmp/gw-mount/usr/bin/bash` instead of `/usr/bin/bash`, and a rule
+   written as `caller: "**/bash"` is technically still matched by the
+   `**` wildcard but the event field is ugly and confusing. The
+   resolver has an optional `StripPrefix` field that removes the mount
+   point so events carry the backing path (`/usr/bin/bash`).
+
+2. **Cache invalidation across `execve`.** The `ProcResolver` was
+   originally keyed by `(pid, starttime)`. But `starttime` is set at
+   fork and does **not** change across `execve`. So when bash forks
+   and the child execs `cat`, the child's PID is the same, the
+   starttime is the same, and the cache happily returns the stale
+   "bash" entry — which would make every `cat` invocation look like
+   bash. Transparent mode aggressively fails over to **TTL=0** (no
+   caching) so each operation re-reads `/proc/<pid>/exe`. This is a
+   ~20μs read per op, well within budget for observability.
+
+### Example run
+
+```sh
+greywall fuse --transparent \
+    --backing / \
+    --mount   /tmp/gw-mount \
+    --rules   /tmp/gw-rules.yaml \
+    --events-file /tmp/gw-events.jsonl \
+    -- bash
+```
+
+Inside the shell:
+
+```sh
+pwd                                     # /home/tito/code (real path!)
+id                                      # uid=0 (inside the namespace)
+cat /tmp/gw-test/README.md              # goes through FUSE, allowed
+cat /tmp/gw-test/.git/HEAD              # DENIED (cat is not git)
+git -C /tmp/gw-test log -1              # ALLOWED (caller /usr/bin/git)
+python3 -c "open('/tmp/gw-test/.git/HEAD').read()"  # DENIED
+```
+
+The last line is the win over non-transparent mode: python's absolute
+real path is intercepted because there **is** no real path anymore.
+
 ## Limitations (by design, for now)
 
 | Limitation | Why | Mitigation / future |
 |---|---|---|
-| **Not transparent** — the sandboxed process must operate under the mount path, not its real paths | Experiment deliberately avoids touching bwrap | Phase 2: `unshare(CLONE_NEWNS\|CLONE_NEWUSER)` + mount FUSE over the process's view of `/`, then exec inside the namespace. This is how rootless containers and bubblewrap itself work |
 | **Coarse read/write classification** — decided at `open` by `O_*` flags, not per syscall | Per-op interception on open fds requires a `FileHandle` wrapper | Wrap `loopbackFile` to intercept per-read/per-write |
+| **Non-transparent mode leaks** — without `--transparent`, a process can bypass FUSE by using real backing paths | Non-transparent is simpler; keeps the hook layer standalone | Use `--transparent` (now available) for full coverage |
 | **No content rewriting** | Scope kept tight; observe+allow/deny only | The hook layer already has the op in its hands; rewriting means returning different bytes from `Read` |
 | **No hot-reload of rules** | Config file loaded once at startup | Add `fsnotify` on the rules file; atomic pointer swap |
 | **No greyproxy forwarding yet** | Keep the experiment self-contained | Add an `HTTPSink` that POSTs to `greyproxy /api/fs-events` (or `WebsocketSink` against the existing EventBus) |

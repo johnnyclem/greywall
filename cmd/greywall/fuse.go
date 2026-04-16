@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -29,6 +28,7 @@ func newFuseCmd() *cobra.Command {
 		debug       bool
 		chdirTo     string
 		eventsFile  string
+		transparent bool
 	)
 
 	cmd := &cobra.Command{
@@ -57,6 +57,7 @@ Example:
 				Debug:       debug,
 				ChdirTo:     chdirTo,
 				EventsFile:  eventsFile,
+				Transparent: transparent,
 				Command:     args,
 			})
 		},
@@ -70,6 +71,7 @@ Example:
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable verbose go-fuse request logging on stderr")
 	cmd.Flags().StringVar(&chdirTo, "cwd", "", "chdir target for the spawned command; path is interpreted inside the FUSE mount. Defaults to the process's CWD translated into the mount.")
 	cmd.Flags().StringVar(&eventsFile, "events-file", "", "Write JSON events to this file instead of stdout. File is truncated at open, then appended line-by-line.")
+	cmd.Flags().BoolVar(&transparent, "transparent", false, "Wrap the child in a private mount namespace (CLONE_NEWNS|CLONE_NEWUSER, rootless) and chroot into the FUSE mount so every absolute path the child resolves goes through the hook layer. Linux only.")
 	return cmd
 }
 
@@ -81,6 +83,7 @@ type fuseOptions struct {
 	Debug       bool
 	ChdirTo     string
 	EventsFile  string
+	Transparent bool
 	Command     []string
 }
 
@@ -113,8 +116,18 @@ func runFuse(opts fuseOptions) error {
 	} else {
 		sinkWriter = os.Stdout
 	}
+	// In transparent mode, /proc/<pid>/exe read from the parent
+	// namespace is prefixed with the FUSE mount point; strip it so
+	// rule authors can write **/git, not **/tmp/gw-.../usr/bin/git.
+	// Cache TTL stays at 0 so caller resolution remains correct
+	// across the very common "bash forks and execs cat" transition,
+	// where PID+starttime do not change but /proc/<pid>/exe does.
+	resolver := gwfuse.NewProcResolver(0)
+	if opts.Transparent {
+		resolver.StripPrefix = opts.MountPoint
+	}
 	hooks := &gwfuse.Hooks{
-		Resolver:    gwfuse.NewProcResolver(1 * time.Second),
+		Resolver:    resolver,
 		Rules:       rules,
 		Sink:        gwfuse.NewStdoutSink(sinkWriter),
 		ObserveOnly: opts.ObserveOnly,
@@ -148,36 +161,13 @@ func runFuse(opts fuseOptions) error {
 		_ = mnt.Close()
 	}()
 
-	// 5. Resolve chdir target inside the mount.
-	cwdInMount := opts.ChdirTo
-	if cwdInMount == "" {
-		realCwd, err := os.Getwd()
-		if err == nil && filepath.IsAbs(realCwd) {
-			// Translate realCwd into the mount: if backing is / and
-			// realCwd is /home/x, cwdInMount = /tmp/gw/home/x.
-			rel, err := filepath.Rel(opts.Backing, realCwd)
-			if err == nil {
-				cwdInMount = filepath.Join(opts.MountPoint, rel)
-			}
-		}
+	// 5. Spawn the child command — transparent or non-transparent.
+	var runErr error
+	if opts.Transparent {
+		runErr = runTransparent(opts)
+	} else {
+		runErr = runOpaque(opts)
 	}
-
-	// 6. Exec the child command.
-	child := exec.Command(opts.Command[0], opts.Command[1:]...)
-	child.Stdin = os.Stdin
-	child.Stdout = os.Stdout
-	child.Stderr = os.Stderr
-	child.Env = os.Environ()
-	if cwdInMount != "" {
-		if _, err := os.Stat(cwdInMount); err == nil {
-			child.Dir = cwdInMount
-		} else {
-			fmt.Fprintf(os.Stderr, "[greywall fuse] warning: chdir target %q not usable (%v), falling back to inherited CWD\n", cwdInMount, err)
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "[greywall fuse] exec %v (cwd=%s)\n", opts.Command, child.Dir)
-	runErr := child.Run()
 
 	// 7. Return with child's exit code.
 	if runErr == nil {
@@ -197,4 +187,93 @@ func defaultOrAllow(a gwfuse.Action) gwfuse.Action {
 		return gwfuse.ActionAllow
 	}
 	return a
+}
+
+// runOpaque is the non-transparent path: start the child in the parent
+// namespace with its working directory pointed at a path under the
+// FUSE mount. Only operations whose path resolves under the mount are
+// visible to the hook layer.
+func runOpaque(opts fuseOptions) error {
+	cwdInMount := opts.ChdirTo
+	if cwdInMount == "" {
+		realCwd, err := os.Getwd()
+		if err == nil && filepath.IsAbs(realCwd) {
+			rel, err := filepath.Rel(opts.Backing, realCwd)
+			if err == nil {
+				cwdInMount = filepath.Join(opts.MountPoint, rel)
+			}
+		}
+	}
+
+	child := exec.Command(opts.Command[0], opts.Command[1:]...)
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Env = os.Environ()
+	if cwdInMount != "" {
+		if _, err := os.Stat(cwdInMount); err == nil {
+			child.Dir = cwdInMount
+		} else {
+			fmt.Fprintf(os.Stderr, "[greywall fuse] warning: chdir target %q not usable (%v), falling back to inherited CWD\n", cwdInMount, err)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[greywall fuse] exec %v (cwd=%s)\n", opts.Command, child.Dir)
+	return child.Run()
+}
+
+// runTransparent wraps the child in a private user+mount namespace and
+// re-execs greywall itself as the `fuse-ns-setup` helper, which then
+// bind-mounts /proc, /sys, /dev, chroots into the FUSE mount, and
+// finally execs the user command. Because the child's view of `/` IS
+// the FUSE mount, every absolute path the child resolves goes through
+// the hook layer. There is no "real path" to escape to.
+func runTransparent(opts fuseOptions) error {
+	// Compute the chdir target as an absolute path INSIDE the chroot.
+	// After chroot, the child's `/` equals the FUSE mount which
+	// passes through to opts.Backing. So the path inside the chroot
+	// is whatever the real directory's path relative to the backing
+	// is.
+	chdirInChroot := "/"
+	if opts.ChdirTo != "" {
+		// opts.ChdirTo is a non-chrooted path, often pointing inside
+		// the FUSE mount. Strip the mount prefix if present, otherwise
+		// treat it as already relative to the chroot.
+		if rel, err := filepath.Rel(opts.MountPoint, opts.ChdirTo); err == nil && !filepath.IsAbs(rel) && !startsWithDotDot(rel) {
+			chdirInChroot = filepath.Join("/", rel)
+		} else {
+			chdirInChroot = opts.ChdirTo
+		}
+	} else if realCwd, err := os.Getwd(); err == nil && filepath.IsAbs(realCwd) {
+		if rel, err := filepath.Rel(opts.Backing, realCwd); err == nil && !startsWithDotDot(rel) {
+			chdirInChroot = filepath.Join("/", rel)
+		}
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve self: %w", err)
+	}
+
+	helperArgs := append([]string{
+		"fuse-ns-setup",
+		opts.MountPoint,
+		chdirInChroot,
+	}, opts.Command...)
+
+	child := exec.Command(self, helperArgs...)
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Env = os.Environ()
+	child.SysProcAttr = transparentSysProcAttr()
+
+	fmt.Fprintf(os.Stderr, "[greywall fuse] transparent: chroot=%s cwd-in-chroot=%s cmd=%v\n",
+		opts.MountPoint, chdirInChroot, opts.Command)
+
+	return child.Run()
+}
+
+func startsWithDotDot(rel string) bool {
+	return rel == ".." || len(rel) >= 3 && rel[:3] == "../"
 }

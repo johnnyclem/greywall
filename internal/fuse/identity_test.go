@@ -43,6 +43,58 @@ func TestProcResolverUnknownPID(t *testing.T) {
 	}
 }
 
+func TestStripPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		exe        string
+		prefix     string
+		wantPath   string
+		wantOk     bool
+	}{
+		{"no prefix", "/usr/bin/bash", "", "/usr/bin/bash", false},
+		{"prefix matches", "/tmp/gw/usr/bin/bash", "/tmp/gw", "/usr/bin/bash", true},
+		{"prefix with trailing slash", "/tmp/gw/usr/bin/bash", "/tmp/gw/", "/usr/bin/bash", true},
+		{"prefix is root", "/usr/bin/bash", "/", "/usr/bin/bash", false}, // "/" prefix is a no-op
+		{"prefix sibling not substring", "/tmp/gwfoo/bin/bash", "/tmp/gw", "/tmp/gwfoo/bin/bash", false},
+		{"prefix equals exe", "/tmp/gw", "/tmp/gw", "/tmp/gw", false}, // no trailing component
+		{"no match", "/other/bin/bash", "/tmp/gw", "/other/bin/bash", false},
+		{"empty exe", "", "/tmp/gw", "", false},
+	}
+	for _, c := range cases {
+		got, ok := stripPrefix(c.exe, c.prefix)
+		if got != c.wantPath || ok != c.wantOk {
+			t.Errorf("%s: stripPrefix(%q,%q) = (%q,%v), want (%q,%v)",
+				c.name, c.exe, c.prefix, got, ok, c.wantPath, c.wantOk)
+		}
+	}
+}
+
+func TestResolverStripPrefixApplied(t *testing.T) {
+	// Build a resolver with a strip prefix and check Resolve(self)
+	// returns the exe without the prefix if it happens to match. We
+	// synthesize a "prefix match" by using os.Executable as the exe
+	// and stripping its leading dir.
+	r := NewProcResolver(0)
+	selfExe, err := os.Executable()
+	if err != nil || selfExe == "" {
+		t.Skip("no self exe")
+	}
+	// Strip the first directory component to simulate a prefix.
+	// e.g. "/tmp/go-build.../fuse.test" → prefix "/tmp" → "/go-build.../fuse.test"
+	if len(selfExe) < 5 {
+		t.Skip("self exe too short")
+	}
+	slash := strings.Index(selfExe[1:], "/")
+	if slash < 0 {
+		t.Skip("no leading dir")
+	}
+	r.StripPrefix = selfExe[:1+slash]
+	info := r.Resolve(uint32(os.Getpid()))
+	if strings.HasPrefix(info.Exe, r.StripPrefix+"/") {
+		t.Errorf("StripPrefix not applied: exe=%q prefix=%q", info.Exe, r.StripPrefix)
+	}
+}
+
 func TestParseStat(t *testing.T) {
 	// Synthetic stat line: pid 1234, comm "my (odd) proc", state S,
 	// ppid 1000, then filler until starttime at field 22.

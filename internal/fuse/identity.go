@@ -25,8 +25,17 @@ type Resolver interface {
 // ProcResolver reads /proc/<pid>/* to resolve caller identity. It keeps a
 // small LRU-ish cache keyed by (pid, startTime) with a short TTL to absorb
 // repeated lookups for the same operation burst.
+//
+// StripPrefix, if non-empty, is removed from resolved exe paths. This is
+// used by transparent mode where the FUSE daemon reads /proc/<pid>/exe
+// from the parent namespace — the kernel's path reconstruction includes
+// the mount point (e.g. "/tmp/gw/usr/bin/git" instead of "/usr/bin/git"),
+// so we strip it to get the underlying backing path that rule authors
+// expect to write globs against.
 type ProcResolver struct {
-	TTL  time.Duration
+	TTL         time.Duration
+	StripPrefix string
+
 	mu   sync.Mutex
 	seen map[uint32]cacheEntry
 }
@@ -47,6 +56,14 @@ func NewProcResolver(ttl time.Duration) *ProcResolver {
 
 // Resolve returns caller info for pid. On any read error the returned
 // CallerInfo has Exe="unknown".
+//
+// Cache correctness note: the cache is keyed by PID only and is only
+// safe for operation bursts where exec(2) is not expected to happen
+// between calls. Because /proc/<pid>/exe changes after execve without
+// any change in starttime, a process that bash-fork-execs a child does
+// NOT get a new cache key — the pre-exec bash entry would be returned.
+// The cache therefore only uses a TTL as a coarse freshness guard;
+// callers concerned about exec-time accuracy should set TTL=0.
 func (r *ProcResolver) Resolve(pid uint32) CallerInfo {
 	now := time.Now()
 
@@ -60,6 +77,11 @@ func (r *ProcResolver) Resolve(pid uint32) CallerInfo {
 	}
 
 	info := readProc(pid)
+	if r.StripPrefix != "" && info.Exe != "" && info.Exe != "unknown" {
+		if stripped, ok := stripPrefix(info.Exe, r.StripPrefix); ok {
+			info.Exe = stripped
+		}
+	}
 
 	if r.TTL > 0 {
 		r.mu.Lock()
@@ -80,6 +102,29 @@ func (r *ProcResolver) Resolve(pid uint32) CallerInfo {
 	}
 
 	return info
+}
+
+// stripPrefix removes a mount-point prefix from a resolved exe path so
+// the resulting path looks like the underlying backing path. Returns
+// (stripped, true) when the prefix matched, (exe, false) otherwise.
+// The stripped form always starts with "/".
+func stripPrefix(exe, prefix string) (string, bool) {
+	if prefix == "" || exe == "" {
+		return exe, false
+	}
+	// Normalize: trim a trailing slash so "/mnt/" and "/mnt" behave
+	// the same, and require the next char to be / so we don't strip
+	// "/mnt" from "/mntfoo".
+	for len(prefix) > 1 && prefix[len(prefix)-1] == '/' {
+		prefix = prefix[:len(prefix)-1]
+	}
+	if len(exe) <= len(prefix) || exe[:len(prefix)] != prefix {
+		return exe, false
+	}
+	if exe[len(prefix)] != '/' {
+		return exe, false
+	}
+	return exe[len(prefix):], true
 }
 
 func readProc(pid uint32) CallerInfo {
