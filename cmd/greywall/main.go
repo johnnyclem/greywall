@@ -55,6 +55,8 @@ var (
 	allowDests             []string
 	blankProfile           bool
 	noBwrap                bool
+	netnsPath              string
+	netnsHelperPath        string
 )
 
 func main() {
@@ -128,6 +130,8 @@ Configuration file format:
 	rootCmd.Flags().BoolVar(&linuxFeatures, "linux-features", false, "Show available Linux security features and exit")
 	rootCmd.Flags().BoolVar(&learning, "learning", false, "Run in learning mode: trace filesystem access and generate a config profile")
 	rootCmd.Flags().BoolVar(&noBwrap, "no-bwrap", false, "Skip bubblewrap; enforce via Landlock + seccomp only (for nested-Docker environments where bwrap cannot create user namespaces)")
+	rootCmd.Flags().StringVar(&netnsPath, "netns", "", "Run the wrapped command inside a pre-built netns (from greywall-netns-helper create). Pairs with --no-bwrap.")
+	rootCmd.Flags().StringVar(&netnsHelperPath, "netns-helper", "", "Path to greywall-netns-helper (default: look up in PATH)")
 	rootCmd.Flags().StringVar(&profileName, "profile", "", "Load profiles by name, comma-separated (e.g. --profile claude,uv)")
 	rootCmd.Flags().BoolVar(&noNetworkRules, "no-network-rules", false, "Skip applying profile network rules to greyproxy (filesystem + keyring still apply)")
 	rootCmd.Flags().BoolVar(&autoProfile, "auto-profile", false, "Use saved or built-in profile without prompting")
@@ -385,6 +389,15 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		manager.SetNoBwrap(true)
 		if debug {
 			fmt.Fprintf(os.Stderr, "[greywall] --no-bwrap mode: Landlock + seccomp only, no namespaces\n")
+		}
+	}
+	if netnsPath != "" {
+		if !noBwrap {
+			return fmt.Errorf("--netns requires --no-bwrap (bwrap creates its own netns)")
+		}
+		manager.SetNetns(netnsPath, netnsHelperPath)
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall] --netns=%s: wrapped command will run inside pre-built netns\n", netnsPath)
 		}
 	}
 	defer manager.Cleanup()

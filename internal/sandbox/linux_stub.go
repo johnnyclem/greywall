@@ -102,7 +102,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 }
 
 // WrapCommandLinuxNoBwrap returns an error on non-Linux platforms.
-func WrapCommandLinuxNoBwrap(cfg *config.Config, command string, debug bool) (string, error) {
+func WrapCommandLinuxNoBwrap(cfg *config.Config, command string, debug bool, netnsPath, netnsHelper string) (string, error) {
 	return "", fmt.Errorf("linux sandbox not available on this platform")
 }
 

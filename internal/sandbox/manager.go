@@ -25,6 +25,8 @@ type Manager struct {
 	initialized   bool
 	learning      bool   // learning mode: permissive sandbox with strace/eslogger
 	noBwrap       bool   // --no-bwrap: skip bubblewrap, rely on Landlock + seccomp only
+	netnsPath     string // --netns: pre-built netns to enter (requires noBwrap)
+	netnsHelper   string // override path to greywall-netns-helper
 	straceLogPath string // host-side temp file for strace output (Linux)
 	commandName   string // name of the command being learned
 	// macOS learning mode fields
@@ -64,6 +66,14 @@ func (m *Manager) SetNoBwrap(enabled bool) {
 // IsNoBwrap returns whether --no-bwrap mode is active.
 func (m *Manager) IsNoBwrap() bool {
 	return m.noBwrap
+}
+
+// SetNetns points the --no-bwrap path at a pre-built netns (created by
+// greywall-netns-helper create). helperPath is optional; empty string means
+// look up greywall-netns-helper in $PATH.
+func (m *Manager) SetNetns(netnsPath, helperPath string) {
+	m.netnsPath = netnsPath
+	m.netnsHelper = helperPath
 }
 
 // SetCommandName sets the command name for learning mode profile generation.
@@ -273,7 +283,7 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 			return m.wrapCommandLearning(command)
 		}
 		if m.noBwrap {
-			return WrapCommandLinuxNoBwrap(m.config, command, m.debug)
+			return WrapCommandLinuxNoBwrap(m.config, command, m.debug, m.netnsPath, m.netnsHelper)
 		}
 		return WrapCommandLinuxWithOptions(m.config, command, m.proxyBridge, m.dnsBridge, m.reverseBridge, m.forwardBridge, m.dbusBridge, m.tun2socksPath, LinuxSandboxOptions{
 			UseLandlock:       true,
