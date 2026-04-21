@@ -54,6 +54,7 @@ var (
 	skipVersionCheck       bool
 	allowDests             []string
 	blankProfile           bool
+	noBwrap                bool
 )
 
 func main() {
@@ -126,6 +127,7 @@ Configuration file format:
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "v", false, "Show version information")
 	rootCmd.Flags().BoolVar(&linuxFeatures, "linux-features", false, "Show available Linux security features and exit")
 	rootCmd.Flags().BoolVar(&learning, "learning", false, "Run in learning mode: trace filesystem access and generate a config profile")
+	rootCmd.Flags().BoolVar(&noBwrap, "no-bwrap", false, "Skip bubblewrap; enforce via Landlock + seccomp only (for nested-Docker environments where bwrap cannot create user namespaces)")
 	rootCmd.Flags().StringVar(&profileName, "profile", "", "Load profiles by name, comma-separated (e.g. --profile claude,uv)")
 	rootCmd.Flags().BoolVar(&noNetworkRules, "no-network-rules", false, "Skip applying profile network rules to greyproxy (filesystem + keyring still apply)")
 	rootCmd.Flags().BoolVar(&autoProfile, "auto-profile", false, "Use saved or built-in profile without prompting")
@@ -378,6 +380,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	if learning {
 		manager.SetLearning(true)
 		manager.SetCommandName(cmdName)
+	}
+	if noBwrap {
+		manager.SetNoBwrap(true)
+		if debug {
+			fmt.Fprintf(os.Stderr, "[greywall] --no-bwrap mode: Landlock + seccomp only, no namespaces\n")
+		}
 	}
 	defer manager.Cleanup()
 
@@ -1255,20 +1263,30 @@ profiles, first save a copy with --learning or copy the output of "profiles show
 }
 
 // runLandlockWrapper runs in "wrapper mode" inside the sandbox.
-// It applies Landlock restrictions and then execs the user command.
-// Usage: greywall --landlock-apply [--debug] -- <command...>
+// It applies Landlock restrictions (and optionally seccomp) and then execs
+// the user command.
+//
+// Usage: greywall --landlock-apply [--debug] [--seccomp] -- <command...>
+//
 // Config is passed via GREYWALL_CONFIG_JSON environment variable.
+//
+// The --seccomp flag is used by --no-bwrap mode: without bwrap, we no longer
+// have a way to load the seccomp filter via --seccomp <fd>, so we load it
+// directly here, right after Landlock.
 func runLandlockWrapper() {
-	// Parse arguments: --landlock-apply [--debug] -- <command...>
+	// Parse arguments: --landlock-apply [--debug] [--seccomp] -- <command...>
 	args := os.Args[2:] // Skip "greywall" and "--landlock-apply"
 
 	var debugMode bool
+	var applySeccomp bool
 	var cmdStart int
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--debug":
 			debugMode = true
+		case "--seccomp":
+			applySeccomp = true
 		case "--":
 			cmdStart = i + 1
 			goto parseCommand
@@ -1320,6 +1338,15 @@ parseCommand:
 			// Continue without Landlock - bwrap still provides isolation
 		} else if debugMode {
 			fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Landlock restrictions applied\n")
+		}
+
+		// Apply seccomp after Landlock (both require NO_NEW_PRIVS; Landlock
+		// already set it, but ApplySeccompFilter re-asserts it idempotently).
+		if applySeccomp {
+			if err := sandbox.ApplySeccompFilter(debugMode); err != nil {
+				fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Warning: seccomp not applied: %v\n", err)
+				// Non-fatal: continue without syscall filtering.
+			}
 		}
 	}
 
