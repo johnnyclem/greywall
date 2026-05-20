@@ -31,7 +31,8 @@ func init() {
 				"~/.mcp.json",
 			}
 			if runtime.GOOS == "darwin" {
-				allowRead = append(allowRead,
+				allowRead = append(
+					allowRead,
 					"~/Library/Application Support/Claude/claude_desktop_config.json",
 					"/Library/Application Support/ClaudeCode/managed-settings.json",
 					"/Library/Application Support/ClaudeCode/managed-mcp.json",
@@ -42,7 +43,8 @@ func init() {
 					"/tmp/claude-*",
 					"/tmp/claude-*/**",
 				)
-				allowWrite = append(allowWrite,
+				allowWrite = append(
+					allowWrite,
 					"/tmp/claude-*",
 					"/tmp/claude-*/**",
 				)

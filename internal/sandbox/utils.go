@@ -75,7 +75,8 @@ func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
 		"192.168.0.0/16",
 	}, ",")
 
-	envVars = append(envVars,
+	envVars = append(
+		envVars,
 		"NO_PROXY="+noProxy,
 		"no_proxy="+noProxy,
 	)
@@ -83,7 +84,8 @@ func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
 	// ALL_PROXY uses socks5h:// (remote DNS resolution via proxy)
 	if proxyURL != "" {
 		socksURL := strings.Replace(proxyURL, "socks5://", "socks5h://", 1)
-		envVars = append(envVars,
+		envVars = append(
+			envVars,
 			"ALL_PROXY="+socksURL,
 			"all_proxy="+socksURL,
 		)
@@ -91,7 +93,8 @@ func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
 
 	// HTTP_PROXY/HTTPS_PROXY use the HTTP CONNECT proxy (not SOCKS5)
 	if httpProxyURL != "" {
-		envVars = append(envVars,
+		envVars = append(
+			envVars,
 			"HTTP_PROXY="+httpProxyURL,
 			"HTTPS_PROXY="+httpProxyURL,
 			"http_proxy="+httpProxyURL,
