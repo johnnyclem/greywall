@@ -62,7 +62,9 @@ internal/
     linux_landlock.go    Landlock filesystem control.
     linux_ebpf.go        eBPF violation monitor (-m flag, needs CAP_BPF/root).
     learning_*.go        --learning mode: strace (Linux) / eslogger (macOS) tracing → profile generation.
-    credentials.go       Credential substitution (gh/glab via libsecret keyring).
+    tracer_*.go          Streaming tracer for --record-fs: tails the strace/eslogger log and pushes FsEvents into a ring buffer.
+    fsevents.go          FsEvent wire type + bounded ring buffer (drop-oldest, shared between tracer and heartbeat loop).
+    credentials.go       Credential substitution (gh/glab via libsecret keyring); StartHeartbeatLoop ships FsEvents to greyproxy on each tick.
     sanitize.go          Strips LD_*/DYLD_* and other dangerous env vars.
     dangerous.go         Hard-floor protected files/dirs (e.g. ~/.ssh/authorized_keys, git hooks).
     tun2socks_embed.go   Embeds tun2socks v2.5.2 binary (downloaded by Makefile).
@@ -77,6 +79,7 @@ Key cross-cutting points:
 - **Network on macOS:** no namespace isolation; Seatbelt blocks direct egress except to the proxy address, and proxy env vars steer well-behaved clients.
 - **Watch mode (`--watch` / `greywatch`):** skips profile load, registers a `*/*` allow rule with greyproxy, and runs the command with a permissive filesystem. Hard-floor denies (`dangerous.go`) and credential substitution stay on. Traffic still goes through greyproxy so the dashboard sees every request.
 - **Learning mode (`--learning`):** traces the command (strace/eslogger), collapses observed paths into glob patterns, and writes a per-command template under the user's profile directory. Re-running the same command auto-loads the learned template.
+- **Filesystem event recording (`--record-fs`):** reuses the learning-mode tracer to push live FsEvents into a ring buffer that `StartHeartbeatLoop` drains on each tick and POSTs to greyproxy in the heartbeat body. Auto-enabled by `--watch`; only valid alongside `--watch` or `--learning` because strace requires ptrace, which seccomp/landlock would block. Version-gated via `proxy.SupportsFsEvents` so older greyproxy builds aren't sent payloads they don't understand.
 
 ## Code Conventions
 

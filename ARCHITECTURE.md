@@ -53,6 +53,8 @@ greywall/
 │       ├── command.go   # Command blocking/allow lists
 │       ├── hardening.go # Environment sanitization
 │       ├── dangerous.go # Protected file/directory lists
+│       ├── fsevents.go  # FsEvent wire type + bounded ring buffer
+│       ├── tracer_*.go  # --record-fs streaming tracer (strace/eslogger tail)
 │       ├── shell.go     # Shell quoting utilities
 │       └── utils.go     # Path normalization
 └── pkg/greywall/           # Public Go API
@@ -226,6 +228,46 @@ Flow:
 1. Host socat listens on TCP port (e.g., 8888)
 2. Sandbox socat creates Unix socket, forwards to app
 3. External request → Host:8888 → Unix socket → Sandbox socat → App:8888
+
+## Filesystem Event Recording (`--record-fs`)
+
+Greywall can stream the sandboxed command's filesystem operations to greyproxy so they appear alongside network activity on the dashboard. Events ride the existing session heartbeat — there is no second connection or new port.
+
+```mermaid
+flowchart LR
+    subgraph Sandbox
+        CMD["User Command"]
+    end
+
+    subgraph Host
+        STRACE["strace -f (Linux)<br/>or eslogger (macOS)"]
+        LOG["temp log file"]
+        TRACER["StreamingTracer<br/>(tracer_*.go)"]
+        BUF["FsEventBuffer<br/>(ring, drop-oldest)"]
+        HB["StartHeartbeatLoop"]
+    end
+
+    PROXY["greyproxy<br/>:43080/api/sessions/{id}/heartbeat"]
+
+    CMD -->|syscalls| STRACE
+    STRACE --> LOG
+    LOG -->|tail| TRACER
+    TRACER -->|FsEvent| BUF
+    BUF -.->|Drain on tick + final flush| HB
+    HB -->|JSON body| PROXY
+```
+
+The tracer is the **same strace/eslogger pipeline** used by learning mode (single tracer per run; learning batch-parses the log at teardown while record-fs streams it live). Both modes share `Manager.tracesEnabled()` to decide whether to launch the platform tracer.
+
+**Control plane vs data plane.** Network traffic flows through greyproxy as a SOCKS5 client — greyproxy "sees" it by terminating the connection. Filesystem operations have no analogous interception point, so the events ride the **control plane**: the heartbeat HTTP/JSON channel to `/api/sessions/{id}/heartbeat`. Heartbeats with no events keep an empty body (wire-compatible with older greyproxy).
+
+**Buffer semantics.** `FsEventBuffer` is a single-producer (tracer) / single-consumer (heartbeat loop) ring buffer. On overflow the oldest event is dropped and a counter advances; the counter ships in the next heartbeat body so the dashboard can show how lossy the window was. Heartbeats fire every 60s; the loop's stop function performs one final drain + POST at shutdown so the trailing sub-interval window isn't lost.
+
+**Constraints.**
+
+- Requires `--watch` or `--learning`. strace uses ptrace which seccomp blocks, so the sandbox shape under record-fs is the same permissive shape as learning mode.
+- Requires greyproxy ≥ `MinVersionFsEvents` (`internal/proxy/detect.go`). Older greyproxy doesn't accept the JSON body, so greywall warns and disables record-fs at startup. Bypass with `--skip-version-check`.
+- On macOS the tracer (eslogger) needs root via sudo; on Linux strace works as the invoking user.
 
 ## Execution Flow
 

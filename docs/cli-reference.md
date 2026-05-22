@@ -29,6 +29,9 @@ greywall <subcommand> [args...]
 | `--debug` | `-d` | Verbose output: proxy activity, filter decisions, sandbox command |
 | `--monitor` | `-m` | Show only violations and blocked requests (audit mode) |
 | `--learning` | | Trace filesystem access with strace/eslogger and auto-generate a profile |
+| `--watch` | | Observability mode: skip profile loading, allow all network (logged on the dashboard), permissive filesystem |
+| `--record-fs` | | Stream live filesystem events to greyproxy via the session heartbeat. Auto-enabled by `--watch`; requires `--watch` or `--learning` (tracing uses ptrace, incompatible with seccomp) |
+| `--no-record-fs` | | Disable filesystem event recording when it would otherwise be auto-enabled (e.g. under `--watch`) |
 | `--secret <VAR>` | | Treat an environment variable as a credential even if it doesn't match the auto-detection rules (repeatable). See [Credential Protection](./credential-protection). |
 | `--inject <LABEL>` | | Inject a credential stored in the greyproxy dashboard into the sandbox by label (repeatable) |
 | `--ignore-secret <VAR>` | | Exclude a variable from credential detection even if it matches the heuristics (repeatable) |

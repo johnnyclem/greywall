@@ -436,6 +436,9 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if recordFsEnabled && !skipVersionCheck {
+		recordFsEnabled = gateRecordFsOnGreyproxy(recordFsEnabled)
+	}
 	if recordFsEnabled {
 		manager.SetRecordFs(true)
 		manager.SetFsEventBuffer(sandbox.NewFsEventBuffer(1024))
@@ -890,6 +893,26 @@ func resolveRecordFs(flagRecord, flagNoRecord, watch, learning bool, cfg *config
 		return false, fmt.Errorf("--record-fs requires --watch or --learning (tracing uses ptrace, incompatible with seccomp)")
 	}
 	return enabled, nil
+}
+
+// gateRecordFsOnGreyproxy probes greyproxy and downgrades record-fs to
+// off when the running greyproxy is too old (or not detected) to accept
+// the heartbeat JSON body. Returns the (possibly downgraded) enabled
+// flag. Bypassed by --skip-version-check.
+func gateRecordFsOnGreyproxy(enabled bool) bool {
+	if !enabled {
+		return false
+	}
+	status := proxy.Detect()
+	if !status.Running {
+		fmt.Fprintf(os.Stderr, "[greywall] Warning: greyproxy is not running; --record-fs disabled (events would be discarded)\n")
+		return false
+	}
+	if !proxy.SupportsFsEvents(status.Version) {
+		fmt.Fprintf(os.Stderr, "[greywall] Warning: greyproxy v%s does not support filesystem event streaming (need v%s+); --record-fs disabled. Upgrade with 'greywall setup'.\n", status.Version, proxy.MinVersionFsEvents)
+		return false
+	}
+	return true
 }
 
 // resolveProfile resolves a single profile name to a config.

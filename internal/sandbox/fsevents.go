@@ -88,3 +88,11 @@ func (b *FsEventBuffer) Len() int {
 	defer b.mu.Unlock()
 	return b.size
 }
+
+// Dropped returns the number of events dropped since the last Drain
+// without consuming or resetting the counter.
+func (b *FsEventBuffer) Dropped() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dropped
+}

@@ -272,6 +272,22 @@ Example:
 }
 ```
 
+## Observability
+
+| Field | Description |
+|-------|-------------|
+| `observability.recordFilesystem` | Stream filesystem events (opens, writes, renames, unlinks, links, mkdirs) to greyproxy via the session heartbeat. Auto-enabled by `--watch` on the CLI; explicit `false` here overrides that. Only takes effect alongside `--watch` or `--learning` because tracing uses ptrace, which seccomp blocks. |
+
+Example:
+
+```json
+{
+  "observability": {
+    "recordFilesystem": true
+  }
+}
+```
+
 ## Other Options
 
 | Field | Description |

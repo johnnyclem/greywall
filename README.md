@@ -219,8 +219,26 @@ What changes vs. normal mode:
 - No profile is loaded — observability runs from a blank default config.
 - A single `*/*` allow rule is registered with greyproxy for the session, so nothing is denied.
 - Filesystem deny-by-default is off and the command deny list is disabled.
+- **Filesystem events also stream to greyproxy** (see `--record-fs` below) so the dashboard sees file activity alongside network requests.
 
 `-m` (violation monitor) stays orthogonal — combine `--watch -m` if you want both.
+
+#### Filesystem event recording (`--record-fs`)
+
+Records every filesystem syscall the sandboxed command performs (opens, writes, unlinks, renames, links, mkdirs) and ships them to greyproxy on each session heartbeat. Auto-enabled by `--watch`; opt out with `--no-record-fs` or `observability.recordFilesystem: false` in config. Standalone usage requires `--watch` or `--learning` — tracing uses ptrace, which seccomp blocks.
+
+```bash
+# Watch mode includes fs recording by default
+greywatch -- claude
+
+# Add fs recording to learning mode (off by default there)
+greywall --learning --record-fs -- opencode
+
+# Disable the auto-enable under watch
+greywatch --no-record-fs -- claude
+```
+
+Requires a greyproxy build that accepts FsEvent payloads in the heartbeat body (current min: see `internal/proxy/detect.go`). Older greyproxy installations are detected at startup; greywall prints a warning and disables recording rather than failing the run.
 
 ### Configuration
 
@@ -244,6 +262,10 @@ Greywall reads from `~/.config/greywall/greywall.json` by default (or `~/Library
   // Block dangerous commands
   "command": {
     "deny": ["git push", "npm publish"]
+  },
+  // Stream filesystem events to greyproxy (requires --watch or --learning)
+  "observability": {
+    "recordFilesystem": true
   }
 }
 ```

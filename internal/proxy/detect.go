@@ -16,6 +16,14 @@ const (
 	healthURL     = "http://localhost:43080/api/health"
 	healthTimeout = 2 * time.Second
 	cmdTimeout    = 5 * time.Second
+
+	// MinVersionFsEvents is the minimum greyproxy version that accepts
+	// FsEvent payloads in the heartbeat body. Older versions ignore the
+	// JSON body or 400 the request, so greywall must disable --record-fs
+	// against them. Placeholder above the latest shipped greyproxy until
+	// the maintainer lands the handler — bump (downward, to the actual
+	// release tag) when that ships.
+	MinVersionFsEvents = "0.5.0"
 )
 
 // GreyproxyStatus holds the detected state of greyproxy.
@@ -87,6 +95,17 @@ func checkVersion(binaryPath string) (string, error) {
 		return "", fmt.Errorf("unexpected version output: %s", strings.TrimSpace(string(out)))
 	}
 	return matches[1], nil
+}
+
+// SupportsFsEvents reports whether the given greyproxy version accepts
+// FsEvent payloads in the heartbeat body. An empty version or the
+// "dev" sentinel is treated as supported so local development builds
+// are not blocked.
+func SupportsFsEvents(version string) bool {
+	if version == "" || version == "dev" {
+		return true
+	}
+	return !IsOlderVersion(version, MinVersionFsEvents)
 }
 
 // checkRunning hits GET http://localhost:43080/api/health and verifies
