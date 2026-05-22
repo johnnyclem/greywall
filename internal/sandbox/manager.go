@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,14 +26,20 @@ type Manager struct {
 	initialized   bool
 	learning      bool   // learning mode: permissive sandbox with strace/eslogger
 	watch         bool   // watch mode: permissive sandbox for pure observability (no strace, no profile gen)
+	recordFs      bool   // stream filesystem events to greyproxy via the shared FsEventBuffer
 	straceLogPath string // host-side temp file for strace output (Linux)
 	commandName   string // name of the command being learned
-	// macOS learning mode fields
-	learningRootPID   int               // root PID of the sandboxed command (for eslogger PID tree tracking)
+	// rootPID is the PID of the sandboxed command's top-level process. Used by
+	// the macOS eslogger parser to filter events to that process tree.
+	rootPID           int
 	esloggerLogPath   string            // temp file for eslogger output (macOS)
 	esloggerCmd       *exec.Cmd         // eslogger subprocess (macOS)
 	rewrittenEnvFiles map[string]string // original path -> temp path with credential placeholders
 	macOSTmpDir       string            // per-session TMPDIR created on macOS (cleaned up on exit)
+	// Streaming filesystem-event recorder. When fsBuf is non-nil and
+	// tracing is active, the tracer pushes events into the buffer.
+	fsBuf  *FsEventBuffer
+	tracer *StreamingTracer
 }
 
 // NewManager creates a new sandbox manager.
@@ -74,6 +81,35 @@ func (m *Manager) IsWatch() bool {
 	return m.watch
 }
 
+// SetRecordFs enables or disables filesystem-event recording. When enabled,
+// the manager launches the platform tracer (strace on Linux, eslogger on
+// macOS) so the streaming tracer can observe filesystem activity. Must be
+// set before Initialize/WrapCommand.
+//
+// Recording requires landlock and seccomp disabled because strace uses
+// ptrace which seccomp blocks.
+func (m *Manager) SetRecordFs(enabled bool) {
+	m.recordFs = enabled
+}
+
+// IsRecordFs returns whether filesystem-event recording is enabled.
+func (m *Manager) IsRecordFs() bool {
+	return m.recordFs
+}
+
+// SetFsEventBuffer installs the ring buffer that the streaming tracer will
+// push events into. If nil, the tracer is not started even if SetRecordFs
+// is true.
+func (m *Manager) SetFsEventBuffer(buf *FsEventBuffer) {
+	m.fsBuf = buf
+}
+
+// tracesEnabled reports whether the manager needs the platform tracer
+// (strace or eslogger) running.
+func (m *Manager) tracesEnabled() bool {
+	return m.learning || m.recordFs
+}
+
 // SetRewrittenEnvFiles sets the map of .env files rewritten with credential placeholders.
 func (m *Manager) SetRewrittenEnvFiles(files map[string]string) {
 	m.rewrittenEnvFiles = files
@@ -89,10 +125,10 @@ func (m *Manager) Initialize() error {
 		return fmt.Errorf("sandbox is not supported on platform: %s", platform.Detect())
 	}
 
-	// On macOS in learning mode, launch eslogger via sudo to trace filesystem access.
-	// Only eslogger itself needs root (Endpoint Security framework) — the sandboxed
-	// command runs as the current user.
-	if platform.Detect() == platform.MacOS && m.learning {
+	// On macOS in learning or record-fs mode, launch eslogger via sudo to trace
+	// filesystem access. Only eslogger itself needs root (Endpoint Security
+	// framework) — the sandboxed command runs as the current user.
+	if platform.Detect() == platform.MacOS && m.tracesEnabled() {
 		logFile, err := os.CreateTemp("", "greywall-eslogger-*.log")
 		if err != nil {
 			return fmt.Errorf("failed to create eslogger log file: %w", err)
@@ -227,10 +263,11 @@ func (m *Manager) Initialize() error {
 		m.dbusBridge = NewDbusBridge(m.debug)
 	}
 
-	// On macOS (non-learning), create a per-session temp directory and expose it
-	// as TMPDIR inside the sandbox. This avoids the need to allow arbitrary writes
-	// to /private/tmp, while giving sandboxed processes a working temp directory.
-	if platform.Detect() == platform.MacOS && !m.learning {
+	// On macOS (when not tracing), create a per-session temp directory and expose
+	// it as TMPDIR inside the sandbox. This avoids the need to allow arbitrary
+	// writes to /private/tmp, while giving sandboxed processes a working temp
+	// directory. Skipped when tracing because the tracer path returns earlier.
+	if platform.Detect() == platform.MacOS && !m.tracesEnabled() {
 		tmpDir, err := os.MkdirTemp("", "greywall-")
 		if err != nil {
 			m.logDebug("warning: failed to create per-session TMPDIR: %v", err)
@@ -271,7 +308,10 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 	switch plat {
 	case platform.MacOS:
 		if m.learning {
-			// In learning mode, run command directly (no sandbox-exec wrapping)
+			// In learning mode, run command directly (no sandbox-exec wrapping).
+			// Record-fs on macOS does not change command wrapping because
+			// eslogger runs out-of-band; the existing Seatbelt path is reused
+			// when watch or normal mode is also active.
 			return command, nil
 		}
 		// Watch mode goes through the normal macOS path so the sandbox-exec
@@ -280,8 +320,8 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 		// Seatbelt profile is wide-open for filesystem reads.
 		return WrapCommandMacOS(m.config, command, m.exposedPorts, m.rewrittenEnvFiles, m.macOSTmpDir, m.debug)
 	case platform.Linux:
-		if m.learning {
-			return m.wrapCommandLearning(command)
+		if m.tracesEnabled() {
+			return m.wrapCommandWithTracing(command)
 		}
 		return WrapCommandLinuxWithOptions(m.config, command, m.proxyBridge, m.dnsBridge, m.reverseBridge, m.forwardBridge, m.dbusBridge, m.tun2socksPath, LinuxSandboxOptions{
 			UseLandlock:       !m.watch,
@@ -297,9 +337,11 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 	}
 }
 
-// wrapCommandLearning creates a permissive sandbox with strace for learning mode (Linux).
-func (m *Manager) wrapCommandLearning(command string) (string, error) {
-	// Create host-side temp file for strace output
+// wrapCommandWithTracing creates a permissive sandbox with strace for either
+// learning or record-fs mode on Linux. Landlock and seccomp must be disabled
+// because seccomp blocks ptrace which strace requires.
+func (m *Manager) wrapCommandWithTracing(command string) (string, error) {
+	// Create host-side temp file for strace output.
 	tmpFile, err := os.CreateTemp("", "greywall-strace-*.log")
 	if err != nil {
 		return "", fmt.Errorf("failed to create strace log file: %w", err)
@@ -307,15 +349,19 @@ func (m *Manager) wrapCommandLearning(command string) (string, error) {
 	_ = tmpFile.Close()
 	m.straceLogPath = tmpFile.Name()
 
-	m.logDebug("Strace log file: %s", m.straceLogPath)
+	m.logDebug("Strace log file: %s (learning=%v recordFs=%v)", m.straceLogPath, m.learning, m.recordFs)
 
 	return WrapCommandLinuxWithOptions(m.config, command, m.proxyBridge, m.dnsBridge, m.reverseBridge, m.forwardBridge, m.dbusBridge, m.tun2socksPath, LinuxSandboxOptions{
-		UseLandlock:   false, // Disabled: seccomp blocks ptrace which strace needs
-		UseSeccomp:    false, // Disabled: conflicts with strace
-		UseEBPF:       false,
-		Debug:         m.debug,
-		Learning:      true,
-		StraceLogPath: m.straceLogPath,
+		UseLandlock:       false, // Disabled: seccomp blocks ptrace which strace needs
+		UseSeccomp:        false, // Disabled: conflicts with strace
+		UseEBPF:           false,
+		Debug:             m.debug,
+		Learning:          m.learning,
+		RecordFs:          m.recordFs,
+		Watch:             m.watch,
+		StraceLogPath:     m.straceLogPath,
+		RewrittenEnvFiles: m.rewrittenEnvFiles,
+		AllowAudio:        m.config != nil && m.config.AllowAudio,
 	})
 }
 
@@ -325,15 +371,65 @@ func (m *Manager) GenerateLearnedTemplate(cmdName string) (string, error) {
 	return m.generateLearnedTemplatePlatform(cmdName)
 }
 
-// SetLearningRootPID records the root PID of the command being learned.
-// The eslogger log parser uses this to build the process tree from fork events.
-func (m *Manager) SetLearningRootPID(pid int) {
-	m.learningRootPID = pid
-	m.logDebug("Set learning root PID: %d", pid)
+// SetRootPID records the PID of the sandboxed command's top-level process.
+// Used by the macOS batch eslogger parser to build the process tree from
+// fork events, and by the streaming tracer to seed its PID filter.
+func (m *Manager) SetRootPID(pid int) {
+	m.rootPID = pid
+	m.logDebug("Set root PID: %d", pid)
+}
+
+// StartFsTracer launches the streaming filesystem-event tracer if
+// record-fs is enabled and an FsEventBuffer has been installed. Safe to
+// call when record-fs is off (returns nil without starting anything).
+//
+// Timing: on Linux this can be called any time after WrapCommand has run
+// (the strace log path exists, even if strace itself hasn't written to it
+// yet). On macOS it should be called after SetRootPID so the tracer can
+// filter to the sandboxed process tree.
+//
+// The tracer continues running until Cleanup is called. ctx is propagated
+// to the tracer goroutine; canceling it also stops the tracer.
+func (m *Manager) StartFsTracer(ctx context.Context) error {
+	if !m.recordFs || m.fsBuf == nil {
+		return nil
+	}
+	if m.tracer != nil {
+		return nil // already started
+	}
+
+	var logPath string
+	switch platform.Detect() {
+	case platform.Linux:
+		logPath = m.straceLogPath
+	case platform.MacOS:
+		logPath = m.esloggerLogPath
+	default:
+		return fmt.Errorf("fs-event recording not supported on this platform")
+	}
+	if logPath == "" {
+		return fmt.Errorf("fs tracer: no log path available (was tracing initialized?)")
+	}
+
+	tracer := NewStreamingTracer(m.fsBuf, m.debug)
+	if err := tracer.Start(ctx, logPath, m.rootPID); err != nil {
+		return fmt.Errorf("start fs tracer: %w", err)
+	}
+	m.tracer = tracer
+	m.logDebug("Started fs event tracer (log=%s rootPID=%d)", logPath, m.rootPID)
+	return nil
 }
 
 // Cleanup stops the proxies and cleans up resources.
 func (m *Manager) Cleanup() {
+	// Stop the streaming fs tracer first so it can drain any remaining
+	// bytes from the strace/eslogger log before those processes exit.
+	if m.tracer != nil {
+		m.logDebug("Stopping fs event tracer")
+		m.tracer.Stop()
+		m.tracer = nil
+	}
+
 	// Stop macOS eslogger if running
 	if m.esloggerCmd != nil && m.esloggerCmd.Process != nil {
 		m.logDebug("Stopping eslogger (PID %d)", m.esloggerCmd.Process.Pid)

@@ -380,13 +380,31 @@ func RegisterSession(sessionID, containerName string, mappings []CredentialMappi
 	}, nil
 }
 
-// HeartbeatSession sends a heartbeat to keep the session alive.
-func HeartbeatSession(sessionID, apiBase string) error {
+// heartbeatRequest is the JSON body for POST /api/sessions/{id}/heartbeat
+// when there are filesystem events to ship.
+type heartbeatRequest struct {
+	Events  []FsEvent `json:"events,omitempty"`
+	Dropped uint64    `json:"dropped,omitempty"`
+}
+
+// HeartbeatSession sends a heartbeat to keep the session alive. When
+// events or a non-zero dropped count are supplied, they are POSTed as a
+// JSON body so greyproxy can record observed filesystem activity.
+func HeartbeatSession(sessionID, apiBase string, events []FsEvent, dropped uint64) error {
 	if apiBase == "" {
 		apiBase = greyproxyAPIBase
 	}
 
-	resp, err := http.Post(apiBase+"/api/sessions/"+sessionID+"/heartbeat", "application/json", nil) //nolint:gosec // local API, sessionID is internally generated
+	var reqBody io.Reader
+	if len(events) > 0 || dropped > 0 {
+		data, err := json.Marshal(heartbeatRequest{Events: events, Dropped: dropped})
+		if err != nil {
+			return fmt.Errorf("marshal heartbeat: %w", err)
+		}
+		reqBody = bytes.NewReader(data)
+	}
+
+	resp, err := http.Post(apiBase+"/api/sessions/"+sessionID+"/heartbeat", "application/json", reqBody) //nolint:gosec // local API, sessionID is internally generated
 	if err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
@@ -434,7 +452,7 @@ func StartHeartbeatLoop(sessionID, containerName string, mappings []CredentialMa
 			case <-stop:
 				return
 			case <-ticker.C:
-				err := HeartbeatSession(sessionID, apiBase)
+				err := HeartbeatSession(sessionID, apiBase, nil, 0)
 				if err != nil {
 					if debug {
 						fmt.Fprintf(os.Stderr, "[greywall:cred] heartbeat failed: %v, re-registering\n", err)

@@ -773,7 +773,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	// Record root PID for macOS learning mode (eslogger uses this for process tree tracking)
 	if learning && platform.Detect() == platform.MacOS && execCmd.Process != nil {
-		manager.SetLearningRootPID(execCmd.Process.Pid)
+		manager.SetRootPID(execCmd.Process.Pid)
 	}
 
 	// Start Linux monitors (eBPF tracing for filesystem violations)

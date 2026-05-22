@@ -23,7 +23,7 @@ func (m *Manager) generateLearnedTemplatePlatform(cmdName string) (string, error
 	}
 
 	// Parse eslogger log with root PID for process tree tracking
-	result, err := ParseEsloggerLog(m.esloggerLogPath, m.learningRootPID, m.debug)
+	result, err := ParseEsloggerLog(m.esloggerLogPath, m.rootPID, m.debug)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse eslogger log: %w", err)
 	}

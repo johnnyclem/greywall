@@ -128,6 +128,12 @@ type LinuxSandboxOptions struct {
 	// permissive bind layout with Learning but does not bind a strace log or
 	// wrap the command with strace.
 	Watch bool
+	// RecordFs enables strace-based filesystem event streaming to greyproxy.
+	// Like Learning, it requires landlock/seccomp to be disabled (strace uses
+	// ptrace, which seccomp blocks). When set, StraceLogPath must also be set
+	// and a strace wrapper is injected around the command in the same way as
+	// Learning mode.
+	RecordFs bool
 	// Path to host-side strace log file (bind-mounted into sandbox)
 	StraceLogPath string
 	// RewrittenEnvFiles maps original .env file paths to temp files containing
@@ -1149,8 +1155,8 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// /tmp needs to be writable for many programs
 	bwrapArgs = append(bwrapArgs, "--tmpfs", "/tmp")
 
-	// Bind strace log file into sandbox AFTER --tmpfs /tmp so it's visible
-	if opts.Learning && opts.StraceLogPath != "" {
+	// Bind strace log file into sandbox AFTER --tmpfs /tmp so it's visible.
+	if (opts.Learning || opts.RecordFs) && opts.StraceLogPath != "" {
 		bwrapArgs = append(bwrapArgs, "--bind", opts.StraceLogPath, opts.StraceLogPath)
 	}
 
@@ -1551,9 +1557,9 @@ sleep 0.3
 	// A SIGCHLD trap kills strace once its direct child exits, handling
 	// the common case of background daemons (LSP servers, watchers).
 	switch {
-	case opts.Learning && opts.StraceLogPath != "":
+	case (opts.Learning || opts.RecordFs) && opts.StraceLogPath != "":
 		fmt.Fprintf(
-			&innerScript, `# Learning mode: trace filesystem access (foreground for terminal access)
+			&innerScript, `# Tracing mode: capture filesystem syscalls via strace (foreground for terminal access)
 strace -f -qq -I2 -e trace=openat,open,creat,mkdir,mkdirat,unlinkat,renameat,renameat2,symlinkat,linkat -o %s -- %s
 GREYWALL_STRACE_EXIT=$?
 # Kill any orphaned child processes (LSP servers, file watchers, etc.)
