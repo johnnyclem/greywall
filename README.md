@@ -124,6 +124,10 @@ greywall --proxy socks5://localhost:1080 -- npm install
 # Expose a port for inbound connections (e.g., dev servers)
 greywall -p 3000 -c "npm run dev"
 
+# Grant an extra directory/file for this run (read+write, or read-only)
+greywall --allow-path /tmp/work -- mytool
+greywall --allow-read-path /data/refs -- mytool
+
 # Enable debug logging
 greywall -d -- curl https://example.com
 
