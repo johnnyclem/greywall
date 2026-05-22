@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -57,6 +58,8 @@ var (
 	allowDests             []string
 	blankProfile           bool
 	watch                  bool
+	recordFs               bool
+	noRecordFs             bool
 )
 
 func main() {
@@ -148,6 +151,8 @@ Configuration file format:
 	rootCmd.Flags().StringArrayVar(&allowDests, "allow", nil, "Allow a network destination for this session (e.g. --allow api.example.com:443)")
 	rootCmd.Flags().BoolVar(&blankProfile, "blank", false, "With --learning, skip default profile network rules (start from scratch)")
 	rootCmd.Flags().BoolVar(&watch, "watch", false, "Watch mode: skip profile loading, allow all network (logged on dashboard), permissive filesystem — observability only, no deny-by-default")
+	rootCmd.Flags().BoolVar(&recordFs, "record-fs", false, "Stream filesystem events to greyproxy via session heartbeat. Auto-enabled by --watch; requires --watch or --learning (tracing uses ptrace, incompatible with seccomp).")
+	rootCmd.Flags().BoolVar(&noRecordFs, "no-record-fs", false, "Disable filesystem event recording when it would otherwise be auto-enabled (e.g. under --watch).")
 
 	// Hidden aliases for backwards compatibility
 	rootCmd.Flags().StringVar(&profileName, "template", "", "Alias for --profile (deprecated)")
@@ -426,6 +431,17 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	if watch {
 		manager.SetWatch(true)
 	}
+
+	recordFsEnabled, err := resolveRecordFs(recordFs, noRecordFs, watch, learning, cfg)
+	if err != nil {
+		return err
+	}
+	if recordFsEnabled {
+		manager.SetRecordFs(true)
+		manager.SetFsEventBuffer(sandbox.NewFsEventBuffer(1024))
+		fmt.Fprintf(os.Stderr, "[greywall] Filesystem event recording enabled (events stream to greyproxy)\n")
+	}
+
 	defer manager.Cleanup()
 
 	if err := manager.Initialize(); err != nil {
@@ -636,7 +652,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 					// for the same key name (e.g., .env has KEY=val1 while
 					// the env var has KEY=val2).
 					hardenedEnv = sandbox.SubstituteEnv(hardenedEnv, envMappings)
-					stopHeartbeat = sandbox.StartHeartbeatLoop(sessionID, containerName, allMappings, injectLabels, meta, "", sessionOpts, debug)
+					stopHeartbeat = sandbox.StartHeartbeatLoop(sessionID, containerName, allMappings, injectLabels, meta, "", sessionOpts, manager.FsEventBuffer(), debug)
 					credSubstitutionActive = true
 					manager.SetRewrittenEnvFiles(rewrittenEnvFiles)
 
@@ -692,7 +708,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 				if learning {
 					fmt.Fprintf(os.Stderr, "[greywall] Learning mode: all network traffic allowed for this session\n")
 				}
-				stopHeartbeat = sandbox.StartHeartbeatLoop(sessionID, containerName, nil, nil, meta, "", sessionOpts, debug)
+				stopHeartbeat = sandbox.StartHeartbeatLoop(sessionID, containerName, nil, nil, meta, "", sessionOpts, manager.FsEventBuffer(), debug)
 			}
 		}
 	} else if credSubstitutionActive && len(sessionNetworkRules) > 0 {
@@ -771,9 +787,16 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Record root PID for macOS learning mode (eslogger uses this for process tree tracking)
-	if learning && platform.Detect() == platform.MacOS && execCmd.Process != nil {
+	// Record root PID so the macOS eslogger parser and the streaming fs
+	// tracer can scope events to this process tree.
+	if execCmd.Process != nil && (manager.IsRecordFs() || (learning && platform.Detect() == platform.MacOS)) {
 		manager.SetRootPID(execCmd.Process.Pid)
+	}
+
+	if manager.IsRecordFs() {
+		if err := manager.StartFsTracer(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "[greywall] Warning: failed to start fs event tracer: %v\n", err)
+		}
 	}
 
 	// Start Linux monitors (eBPF tracing for filesystem violations)
@@ -838,6 +861,35 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveRecordFs computes whether filesystem-event recording should be
+// active for this run. Precedence (highest first): explicit --record-fs,
+// explicit --no-record-fs, explicit config value, watch-mode auto-enable,
+// off. Returns an error if recording would be active outside watch or
+// learning mode (tracing requires landlock+seccomp off, since strace
+// uses ptrace).
+func resolveRecordFs(flagRecord, flagNoRecord, watch, learning bool, cfg *config.Config) (bool, error) {
+	if flagRecord && flagNoRecord {
+		return false, fmt.Errorf("--record-fs and --no-record-fs are mutually exclusive")
+	}
+
+	var enabled bool
+	switch {
+	case flagRecord:
+		enabled = true
+	case flagNoRecord:
+		enabled = false
+	case cfg != nil && cfg.Observability.RecordFilesystem != nil:
+		enabled = *cfg.Observability.RecordFilesystem
+	case watch:
+		enabled = true
+	}
+
+	if enabled && !(watch || learning) {
+		return false, fmt.Errorf("--record-fs requires --watch or --learning (tracing uses ptrace, incompatible with seccomp)")
+	}
+	return enabled, nil
 }
 
 // resolveProfile resolves a single profile name to a config.

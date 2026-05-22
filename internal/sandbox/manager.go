@@ -104,6 +104,12 @@ func (m *Manager) SetFsEventBuffer(buf *FsEventBuffer) {
 	m.fsBuf = buf
 }
 
+// FsEventBuffer returns the installed ring buffer, or nil if none has
+// been set. Callers (e.g. the heartbeat loop) drain it to ship events.
+func (m *Manager) FsEventBuffer() *FsEventBuffer {
+	return m.fsBuf
+}
+
 // tracesEnabled reports whether the manager needs the platform tracer
 // (strace or eslogger) running.
 func (m *Manager) tracesEnabled() bool {

@@ -438,12 +438,36 @@ func DeleteSession(sessionID, apiBase string) error {
 }
 
 // StartHeartbeatLoop starts a goroutine that sends heartbeats every interval.
-// It re-registers the session if heartbeat returns 404.
-// Returns a stop function.
-func StartHeartbeatLoop(sessionID, containerName string, mappings []CredentialMapping, globalCredLabels []string, metadata *SessionMetadata, apiBase string, opts *RegisterSessionOptions, debug bool) func() {
+// It re-registers the session if heartbeat returns 404. When fsBuf is
+// non-nil, each tick drains the buffer and ships queued FsEvents in the
+// heartbeat body; the returned stop function performs a final drain and
+// POST before returning so events from the last sub-interval window are
+// not lost.
+func StartHeartbeatLoop(sessionID, containerName string, mappings []CredentialMapping, globalCredLabels []string, metadata *SessionMetadata, apiBase string, opts *RegisterSessionOptions, fsBuf *FsEventBuffer, debug bool) func() {
 	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	tick := func() {
+		var events []FsEvent
+		var dropped uint64
+		if fsBuf != nil {
+			events, dropped = fsBuf.Drain()
+		}
+		err := HeartbeatSession(sessionID, apiBase, events, dropped)
+		if err != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[greywall:cred] heartbeat failed: %v, re-registering\n", err)
+			}
+			if _, regErr := RegisterSession(sessionID, containerName, mappings, globalCredLabels, metadata, apiBase, opts); regErr != nil {
+				if debug {
+					fmt.Fprintf(os.Stderr, "[greywall:cred] re-register failed: %v\n", regErr)
+				}
+			}
+		}
+	}
 
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 
@@ -452,24 +476,24 @@ func StartHeartbeatLoop(sessionID, containerName string, mappings []CredentialMa
 			case <-stop:
 				return
 			case <-ticker.C:
-				err := HeartbeatSession(sessionID, apiBase, nil, 0)
-				if err != nil {
-					if debug {
-						fmt.Fprintf(os.Stderr, "[greywall:cred] heartbeat failed: %v, re-registering\n", err)
-					}
-					// Re-register on failure (session may have expired or proxy restarted)
-					if _, regErr := RegisterSession(sessionID, containerName, mappings, globalCredLabels, metadata, apiBase, opts); regErr != nil {
-						if debug {
-							fmt.Fprintf(os.Stderr, "[greywall:cred] re-register failed: %v\n", regErr)
-						}
-					}
-				}
+				tick()
 			}
 		}
 	}()
 
 	return func() {
 		close(stop)
+		<-done
+		if fsBuf == nil {
+			return
+		}
+		events, dropped := fsBuf.Drain()
+		if len(events) == 0 && dropped == 0 {
+			return
+		}
+		if err := HeartbeatSession(sessionID, apiBase, events, dropped); err != nil && debug {
+			fmt.Fprintf(os.Stderr, "[greywall:cred] final heartbeat flush failed: %v\n", err)
+		}
 	}
 }
 

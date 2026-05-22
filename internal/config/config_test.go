@@ -455,6 +455,24 @@ func TestMerge(t *testing.T) {
 			t.Error("expected IsDefaultDenyRead() to be false (override explicit false)")
 		}
 	})
+
+	t.Run("observability: override wins when set", func(t *testing.T) {
+		base := &Config{Observability: ObservabilityConfig{RecordFilesystem: boolPtr(false)}}
+		override := &Config{Observability: ObservabilityConfig{RecordFilesystem: boolPtr(true)}}
+		result := Merge(base, override)
+		if result.Observability.RecordFilesystem == nil || !*result.Observability.RecordFilesystem {
+			t.Error("expected RecordFilesystem true (override explicit)")
+		}
+	})
+
+	t.Run("observability: base preserved when override unset", func(t *testing.T) {
+		base := &Config{Observability: ObservabilityConfig{RecordFilesystem: boolPtr(true)}}
+		override := &Config{}
+		result := Merge(base, override)
+		if result.Observability.RecordFilesystem == nil || !*result.Observability.RecordFilesystem {
+			t.Error("expected RecordFilesystem true from base")
+		}
+	})
 }
 
 func boolPtr(b bool) *bool {

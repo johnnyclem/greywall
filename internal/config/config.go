@@ -21,14 +21,15 @@ const CurrentSchemaVersion = 1
 
 // Config is the main configuration for greywall.
 type Config struct {
-	Extends     string           `json:"extends,omitempty"`
-	Network     NetworkConfig    `json:"network"`
-	Filesystem  FilesystemConfig `json:"filesystem"`
-	Command     CommandConfig    `json:"command"`
-	SSH         SSHConfig        `json:"ssh"`
-	Credentials CredentialConfig `json:"credentials,omitempty"`
-	AllowPty    bool             `json:"allowPty,omitempty"`
-	AllowAudio  bool             `json:"allowAudio,omitempty"`
+	Extends       string              `json:"extends,omitempty"`
+	Network       NetworkConfig       `json:"network"`
+	Filesystem    FilesystemConfig    `json:"filesystem"`
+	Command       CommandConfig       `json:"command"`
+	SSH           SSHConfig           `json:"ssh"`
+	Credentials   CredentialConfig    `json:"credentials,omitempty"`
+	Observability ObservabilityConfig `json:"observability,omitempty"`
+	AllowPty      bool                `json:"allowPty,omitempty"`
+	AllowAudio    bool                `json:"allowAudio,omitempty"`
 
 	// SchemaVersion is the learned-profile schema version (stamped on write).
 	// 0/missing means the file predates versioned stamps.
@@ -46,6 +47,16 @@ type CredentialConfig struct {
 	Secrets []string `json:"secrets,omitempty"` // Additional env vars to treat as credentials
 	Inject  []string `json:"inject,omitempty"`  // Global credential labels to inject from proxy
 	Ignore  []string `json:"ignore,omitempty"`  // Env vars to exclude from credential detection
+}
+
+// ObservabilityConfig controls runtime observability features that ship
+// out-of-band data (e.g. filesystem events) to greyproxy.
+type ObservabilityConfig struct {
+	// RecordFilesystem enables streaming filesystem events to greyproxy
+	// via the session heartbeat. Requires watch or learning mode because
+	// tracing uses ptrace, which seccomp blocks. nil means "not set"
+	// (defer to CLI default).
+	RecordFilesystem *bool `json:"recordFilesystem,omitempty"`
 }
 
 // NetworkRule defines a network allow/deny rule sent to greyproxy as part of session creation.
@@ -529,6 +540,10 @@ func Merge(base, override *Config) *Config {
 			Secrets: mergeStrings(base.Credentials.Secrets, override.Credentials.Secrets),
 			Inject:  mergeStrings(base.Credentials.Inject, override.Credentials.Inject),
 			Ignore:  mergeStrings(base.Credentials.Ignore, override.Credentials.Ignore),
+		},
+
+		Observability: ObservabilityConfig{
+			RecordFilesystem: mergeOptionalBool(base.Observability.RecordFilesystem, override.Observability.RecordFilesystem),
 		},
 	}
 
