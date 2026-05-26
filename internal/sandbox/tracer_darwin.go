@@ -191,9 +191,21 @@ func (t *StreamingTracer) handleLine(line string) {
 		return
 	}
 
+	// process.executable.path on the event itself is the binary the PID
+	// was running when ES dispatched it. For ordinary file ops this is
+	// the process's current binary; for an exec event this is the PRE-
+	// exec binary (the post-exec path goes on the FsEvent.Path field
+	// emitted by the classifier). Stamping every event with it lets
+	// the dashboard answer "which binary did this read?" without an
+	// auxiliary PID->exe map.
+	exe := ""
+	if !ev.Process.Executable.PathTruncated {
+		exe = ev.Process.Executable.Path
+	}
 	for _, fsEvent := range classifyEsloggerStreamingEvent(&ev, name) {
 		fsEvent.PID = pid
 		fsEvent.Ts = nowTs()
+		fsEvent.Exe = exe
 		t.buf.Push(fsEvent)
 		if t.onEvent != nil {
 			t.onEvent(fsEvent)

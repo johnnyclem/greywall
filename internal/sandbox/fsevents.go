@@ -13,11 +13,20 @@ func nowTs() string {
 // FsEvent is a single filesystem operation observed inside the sandbox.
 type FsEvent struct {
 	Ts    string `json:"ts"`              // RFC3339Nano timestamp
-	Op    string `json:"op"`              // open_read|open_write|create|unlink|rename|symlink|link|mkdir
+	Op    string `json:"op"`              // open_read|open_write|create|unlink|rename|symlink|link|mkdir|exec
 	Path  string `json:"path"`            // absolute path of the primary target
 	Path2 string `json:"path2,omitempty"` // destination path for rename/link ops
 	PID   int    `json:"pid,omitempty"`
 	Errno int    `json:"errno,omitempty"`
+	// Exe is the absolute path of the binary running in PID at the
+	// moment the event was captured. On macOS it comes from the ES
+	// event's process.executable.path. For an exec event the field
+	// holds the *previous* binary so the transition reads:
+	//   exec /usr/bin/osascript pid=N  exe=/opt/.../claude.exe
+	// On Linux the strace-backed tracer does not currently populate
+	// this (it would require per-event /proc/<pid>/exe lookups), so
+	// the field is empty for Linux events.
+	Exe string `json:"exe,omitempty"`
 }
 
 // FsEventBuffer is a bounded ring buffer of FsEvents. When full, Push
