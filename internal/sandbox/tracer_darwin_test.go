@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -198,6 +199,83 @@ func TestStreamingTracer_PIDFiltering(t *testing.T) {
 func TestStreamingTracer_StopBeforeStart(t *testing.T) {
 	tracer := NewStreamingTracer(NewFsEventBuffer(8), false)
 	tracer.Stop()
+}
+
+// TestStreamingTracer_OnEventCallback verifies that an installed OnEvent
+// fires once per pushed FsEvent, in order, with the same payload that
+// landed in the buffer. This is the contract --record-fs-verbose relies
+// on to stream a live transcript to stderr.
+func TestStreamingTracer_OnEventCallback(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "eslogger.log")
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := NewFsEventBuffer(16)
+	tracer := NewStreamingTracer(buf, false)
+
+	var mu sync.Mutex
+	var seen []FsEvent
+	tracer.SetOnEvent(func(e FsEvent) {
+		mu.Lock()
+		seen = append(seen, e)
+		mu.Unlock()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tracer.Start(ctx, logPath, 42); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer tracer.Stop()
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	writeLine := func(line string) {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeLine(makeEsloggerLine("open", 10, 42,
+		map[string]any{"file": map[string]any{"path": "/a"}, "fflag": 1}))
+	writeLine(makeEsloggerLine("open", 10, 42,
+		map[string]any{"file": map[string]any{"path": "/b"}, "fflag": 2}))
+	writeLine(makeEsloggerLine("unlink", 32, 42,
+		map[string]any{"target": map[string]any{"path": "/c"}}))
+	_ = f.Sync()
+
+	if !waitForLen(buf, 3, 2*time.Second) {
+		t.Fatalf("timed out; buffer has %d", buf.Len())
+	}
+	// Drain the buffer to read what was Pushed and compare against what
+	// OnEvent observed; the two transcripts must match.
+	pushed, _ := buf.Drain()
+
+	// Allow the callback goroutine a moment to flush the last event;
+	// waitForLen guarantees the third Push happened, and OnEvent fires
+	// synchronously right after, but read under the lock to be safe.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != len(pushed) {
+		t.Fatalf("len(seen)=%d, len(pushed)=%d", len(seen), len(pushed))
+	}
+	for i := range pushed {
+		if seen[i].Op != pushed[i].Op || seen[i].Path != pushed[i].Path || seen[i].PID != pushed[i].PID {
+			t.Errorf("event %d: seen=%+v pushed=%+v", i, seen[i], pushed[i])
+		}
+	}
+	// Spot-check op coverage.
+	wantOps := []string{"open_read", "open_write", "unlink"}
+	for i, op := range wantOps {
+		if seen[i].Op != op {
+			t.Errorf("seen[%d].Op = %q, want %q", i, seen[i].Op, op)
+		}
+	}
 }
 
 func TestStreamingTracer_DoubleStart(t *testing.T) {

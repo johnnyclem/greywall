@@ -29,6 +29,12 @@ type StreamingTracer struct {
 	buf   *FsEventBuffer
 	debug bool
 
+	// onEvent is an optional sink invoked after each FsEvent is pushed
+	// into the buffer. Used by --record-fs-verbose to surface live
+	// activity on stderr without forcing extra plumbing through the
+	// heartbeat path. May be nil.
+	onEvent func(FsEvent)
+
 	cancel context.CancelFunc
 	done   chan struct{}
 	stop   sync.Once
@@ -41,6 +47,14 @@ type StreamingTracer struct {
 // buf must be non-nil.
 func NewStreamingTracer(buf *FsEventBuffer, debug bool) *StreamingTracer {
 	return &StreamingTracer{buf: buf, debug: debug}
+}
+
+// SetOnEvent installs a callback invoked once per FsEvent immediately
+// after it is pushed into the buffer. Must be called before Start; the
+// tracer reads the field under no lock during the tail loop. Passing nil
+// disables the callback.
+func (t *StreamingTracer) SetOnEvent(fn func(FsEvent)) {
+	t.onEvent = fn
 }
 
 // Start begins tailing logPath in a background goroutine. rootPID seeds
@@ -181,6 +195,9 @@ func (t *StreamingTracer) handleLine(line string) {
 		fsEvent.PID = pid
 		fsEvent.Ts = nowTs()
 		t.buf.Push(fsEvent)
+		if t.onEvent != nil {
+			t.onEvent(fsEvent)
+		}
 	}
 }
 

@@ -29,3 +29,6 @@ func (t *StreamingTracer) Start(_ context.Context, _ string, _ int) error {
 
 // Stop is a no-op.
 func (t *StreamingTracer) Stop() {}
+
+// SetOnEvent is a no-op on unsupported platforms.
+func (t *StreamingTracer) SetOnEvent(_ func(FsEvent)) {}

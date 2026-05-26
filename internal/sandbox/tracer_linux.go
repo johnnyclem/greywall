@@ -26,6 +26,11 @@ type StreamingTracer struct {
 	buf   *FsEventBuffer
 	debug bool
 
+	// onEvent is an optional sink invoked after each FsEvent is pushed
+	// into the buffer. Used by --record-fs-verbose to surface live
+	// activity on stderr. May be nil. Must be set before Start.
+	onEvent func(FsEvent)
+
 	cancel context.CancelFunc
 	done   chan struct{}
 	stop   sync.Once
@@ -35,6 +40,13 @@ type StreamingTracer struct {
 // buf must be non-nil.
 func NewStreamingTracer(buf *FsEventBuffer, debug bool) *StreamingTracer {
 	return &StreamingTracer{buf: buf, debug: debug}
+}
+
+// SetOnEvent installs a callback invoked once per FsEvent immediately
+// after it is pushed into the buffer. Must be called before Start; nil
+// disables the callback.
+func (t *StreamingTracer) SetOnEvent(fn func(FsEvent)) {
+	t.onEvent = fn
 }
 
 // Start begins tailing logPath in a background goroutine. It returns
@@ -151,6 +163,9 @@ func (t *StreamingTracer) flushPending(r *bufio.Reader, pending *strings.Builder
 func (t *StreamingTracer) classifyAndPush(line string) {
 	if event, ok := classifyStraceLine(line); ok {
 		t.buf.Push(event)
+		if t.onEvent != nil {
+			t.onEvent(event)
+		}
 	}
 }
 
