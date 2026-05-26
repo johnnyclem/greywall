@@ -459,7 +459,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[greywall] Filesystem event recording enabled (events stream to greyproxy)\n")
 		if recordFsVerbose {
 			fmt.Fprintf(os.Stderr, "[greywall] Verbose fs recording: each event will be printed to stderr as it is captured\n")
-			manager.SetFsTracerOnEvent(printFsEventToStderr)
+			manager.SetFsTracerOnEvent(newVerboseFsPrinter())
 		}
 	} else if recordFsVerbose {
 		fmt.Fprintf(os.Stderr, "[greywall] Warning: --record-fs-verbose has no effect without --record-fs (or --watch/--learning to auto-enable it)\n")
@@ -935,23 +935,46 @@ func gateRecordFsOnGreyproxy(enabled bool) bool {
 	return true
 }
 
-// printFsEventToStderr formats one FsEvent for the --record-fs-verbose
-// transcript. The format favors grep-ability over alignment: op first
-// (so common ops cluster when reading), then the primary path, then any
-// supplementary fields. Same ts format the heartbeat ships, so an
-// operator can correlate against the dashboard side-by-side.
-func printFsEventToStderr(e sandbox.FsEvent) {
-	var extra string
-	if e.Path2 != "" {
-		extra += " -> " + e.Path2
+// newVerboseFsPrinter returns the SetFsTracerOnEvent callback for the
+// --record-fs-verbose transcript. It writes each FsEvent to stderr,
+// skipping startup noise (dyld preflight, locale lookups, etc.) and
+// collapsing consecutive duplicates — the kernel exec path emits each
+// binary open twice (once for execve, once for the dyld mapping), and
+// the back-to-back copies just bury signal. Dedup state is scoped to
+// the closure, so it lives exactly as long as the verbose stream.
+//
+// The format favors grep-ability over alignment: op first (so common
+// ops cluster when reading), then the primary path, then supplementary
+// fields. The heartbeat stream sees every event regardless — dashboard
+// remains authoritative.
+func newVerboseFsPrinter() func(sandbox.FsEvent) {
+	var (
+		lastOp, lastPath, lastPath2 string
+		lastPID                     int
+		hasLast                     bool
+	)
+	return func(e sandbox.FsEvent) {
+		if sandbox.IsStartupNoise(e) {
+			return
+		}
+		if hasLast && lastOp == e.Op && lastPath == e.Path && lastPath2 == e.Path2 && lastPID == e.PID {
+			return
+		}
+		lastOp, lastPath, lastPath2, lastPID = e.Op, e.Path, e.Path2, e.PID
+		hasLast = true
+
+		var extra string
+		if e.Path2 != "" {
+			extra += " -> " + e.Path2
+		}
+		if e.Errno != 0 {
+			extra += fmt.Sprintf(" errno=%d", e.Errno)
+		}
+		if e.PID != 0 {
+			extra += fmt.Sprintf(" pid=%d", e.PID)
+		}
+		fmt.Fprintf(os.Stderr, "[greywall:fs] %-10s %s%s\n", e.Op, e.Path, extra)
 	}
-	if e.Errno != 0 {
-		extra += fmt.Sprintf(" errno=%d", e.Errno)
-	}
-	if e.PID != 0 {
-		extra += fmt.Sprintf(" pid=%d", e.PID)
-	}
-	fmt.Fprintf(os.Stderr, "[greywall:fs] %-10s %s%s\n", e.Op, e.Path, extra)
 }
 
 // resolveProfile resolves a single profile name to a config.
