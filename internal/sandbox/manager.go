@@ -1,10 +1,14 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GreyhavenHQ/greywall/internal/config"
@@ -33,13 +37,21 @@ type Manager struct {
 	// the macOS eslogger parser to filter events to that process tree.
 	rootPID           int
 	esloggerLogPath   string            // temp file for eslogger output (macOS)
-	esloggerCmd       *exec.Cmd         // eslogger subprocess (macOS)
+	// esloggerPid is sudo's PID (eslogger is its child). The sudo+eslogger
+	// pair are launched via a short-lived intermediate so they reparent
+	// to launchd; greywall is not their parent and cannot Wait() on them.
+	// To stop them on Cleanup, signal the process group: kill(-pid, SIGTERM).
+	esloggerPid       int
 	rewrittenEnvFiles map[string]string // original path -> temp path with credential placeholders
 	macOSTmpDir       string            // per-session TMPDIR created on macOS (cleaned up on exit)
 	// Streaming filesystem-event recorder. When fsBuf is non-nil and
 	// tracing is active, the tracer pushes events into the buffer.
 	fsBuf  *FsEventBuffer
 	tracer *StreamingTracer
+	// fsTracerOnEvent is an optional per-event callback installed on the
+	// streaming tracer at start-up. --record-fs-verbose uses this to
+	// stream a live transcript of fs activity to stderr.
+	fsTracerOnEvent func(FsEvent)
 }
 
 // NewManager creates a new sandbox manager.
@@ -110,6 +122,14 @@ func (m *Manager) FsEventBuffer() *FsEventBuffer {
 	return m.fsBuf
 }
 
+// SetFsTracerOnEvent installs a per-event callback that the streaming
+// tracer will invoke once per FsEvent, immediately after the event is
+// pushed into the ring buffer. Must be called before StartFsTracer.
+// Passing nil unsets the callback.
+func (m *Manager) SetFsTracerOnEvent(fn func(FsEvent)) {
+	m.fsTracerOnEvent = fn
+}
+
 // tracesEnabled reports whether the manager needs the platform tracer
 // (strace or eslogger) running.
 func (m *Manager) tracesEnabled() bool {
@@ -155,17 +175,36 @@ func (m *Manager) Initialize() error {
 			return fmt.Errorf("sudo authentication failed (needed for eslogger): %w", err)
 		}
 
-		//nolint:gosec // eslogger and sudo paths are hardcoded, event types are constants
-		cmd := exec.Command("/usr/bin/sudo", "/usr/bin/eslogger", "open", "create", "write", "unlink", "truncate", "rename", "link", "fork")
-		cmd.Stdout = logFile
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			_ = logFile.Close()
+		// Close our handle to the log; the intermediate (and the eslogger
+		// it spawns) will reopen it. We need eslogger to live outside
+		// greywall's process tree — see the comment on
+		// runSpawnEsloggerDetached in cmd/greywall/main.go for why.
+		_ = logFile.Close()
+
+		self, execErr := os.Executable()
+		if execErr != nil {
 			_ = os.Remove(m.esloggerLogPath)
-			return fmt.Errorf("failed to start eslogger: %w", err)
+			return fmt.Errorf("locate greywall binary: %w", execErr)
 		}
-		m.esloggerCmd = cmd
-		_ = logFile.Close() // eslogger owns the fd now via its stdout
+
+		var stdout bytes.Buffer
+		//nolint:gosec // self is our own executable resolved above
+		intermediate := exec.Command(self, "--spawn-eslogger-detached", m.esloggerLogPath)
+		intermediate.Stdin = os.Stdin // sudo needs the tty to find cached creds
+		intermediate.Stdout = &stdout
+		intermediate.Stderr = os.Stderr
+		if err := intermediate.Run(); err != nil {
+			_ = os.Remove(m.esloggerLogPath)
+			return fmt.Errorf("failed to spawn detached eslogger: %w", err)
+		}
+		pidStr := strings.TrimSpace(stdout.String())
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 {
+			_ = os.Remove(m.esloggerLogPath)
+			return fmt.Errorf("detached eslogger did not report a valid PID: %q", pidStr)
+		}
+		m.esloggerPid = pid
+		m.logDebug("Spawned detached eslogger (sudo PID %d)", pid)
 
 		// Wait for eslogger to connect to Endpoint Security and start emitting events.
 		// Once connected, it immediately logs events from all processes on the system,
@@ -418,6 +457,9 @@ func (m *Manager) StartFsTracer(ctx context.Context) error {
 	}
 
 	tracer := NewStreamingTracer(m.fsBuf, m.debug)
+	if m.fsTracerOnEvent != nil {
+		tracer.SetOnEvent(m.fsTracerOnEvent)
+	}
 	if err := tracer.Start(ctx, logPath, m.rootPID); err != nil {
 		return fmt.Errorf("start fs tracer: %w", err)
 	}
@@ -436,12 +478,14 @@ func (m *Manager) Cleanup() {
 		m.tracer = nil
 	}
 
-	// Stop macOS eslogger if running
-	if m.esloggerCmd != nil && m.esloggerCmd.Process != nil {
-		m.logDebug("Stopping eslogger (PID %d)", m.esloggerCmd.Process.Pid)
-		_ = m.esloggerCmd.Process.Signal(os.Interrupt)
-		_ = m.esloggerCmd.Wait()
-		m.esloggerCmd = nil
+	// Stop macOS eslogger if running. It was launched detached (reparented
+	// to launchd) so we can't Wait() on it; signal the process group
+	// instead. The intermediate set Setpgid:true, so the sudo+eslogger
+	// pair share a pgrp keyed by sudo's PID.
+	if m.esloggerPid > 0 {
+		m.logDebug("Stopping eslogger pgrp (PID %d)", m.esloggerPid)
+		_ = syscall.Kill(-m.esloggerPid, syscall.SIGTERM)
+		m.esloggerPid = 0
 	}
 
 	if m.dbusBridge != nil {

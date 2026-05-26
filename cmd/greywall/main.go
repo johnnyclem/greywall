@@ -60,6 +60,7 @@ var (
 	watch                  bool
 	recordFs               bool
 	noRecordFs             bool
+	recordFsVerbose        bool
 )
 
 func main() {
@@ -67,6 +68,18 @@ func main() {
 	// This must be checked before cobra to avoid flag conflicts
 	if len(os.Args) >= 2 && os.Args[1] == "--landlock-apply" {
 		runLandlockWrapper()
+		return
+	}
+
+	// Internal mode used on macOS to launch eslogger detached from
+	// greywall's process tree. macOS Endpoint Security suppresses events
+	// for processes that share an ancestor with the ES client, which
+	// would otherwise hide the wrapped command's filesystem activity from
+	// eslogger. We re-exec ourselves so sudo+eslogger become children of
+	// this short-lived intermediate; once the intermediate exits, both
+	// reparent to launchd and no longer share an ancestor with greywall.
+	if len(os.Args) >= 3 && os.Args[1] == "--spawn-eslogger-detached" {
+		runSpawnEsloggerDetached(os.Args[2])
 		return
 	}
 
@@ -153,6 +166,7 @@ Configuration file format:
 	rootCmd.Flags().BoolVar(&watch, "watch", false, "Watch mode: skip profile loading, allow all network (logged on dashboard), permissive filesystem — observability only, no deny-by-default")
 	rootCmd.Flags().BoolVar(&recordFs, "record-fs", false, "Stream filesystem events to greyproxy via session heartbeat. Auto-enabled by --watch; requires --watch or --learning (tracing uses ptrace, incompatible with seccomp).")
 	rootCmd.Flags().BoolVar(&noRecordFs, "no-record-fs", false, "Disable filesystem event recording when it would otherwise be auto-enabled (e.g. under --watch).")
+	rootCmd.Flags().BoolVar(&recordFsVerbose, "record-fs-verbose", false, "With --record-fs, stream every captured filesystem event to stderr as it happens. Noisy; useful for debugging what the agent touches in real time.")
 
 	// Hidden aliases for backwards compatibility
 	rootCmd.Flags().StringVar(&profileName, "template", "", "Alias for --profile (deprecated)")
@@ -443,6 +457,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		manager.SetRecordFs(true)
 		manager.SetFsEventBuffer(sandbox.NewFsEventBuffer(1024))
 		fmt.Fprintf(os.Stderr, "[greywall] Filesystem event recording enabled (events stream to greyproxy)\n")
+		if recordFsVerbose {
+			fmt.Fprintf(os.Stderr, "[greywall] Verbose fs recording: each event will be printed to stderr as it is captured\n")
+			manager.SetFsTracerOnEvent(printFsEventToStderr)
+		}
+	} else if recordFsVerbose {
+		fmt.Fprintf(os.Stderr, "[greywall] Warning: --record-fs-verbose has no effect without --record-fs (or --watch/--learning to auto-enable it)\n")
 	}
 
 	defer manager.Cleanup()
@@ -913,6 +933,25 @@ func gateRecordFsOnGreyproxy(enabled bool) bool {
 		return false
 	}
 	return true
+}
+
+// printFsEventToStderr formats one FsEvent for the --record-fs-verbose
+// transcript. The format favors grep-ability over alignment: op first
+// (so common ops cluster when reading), then the primary path, then any
+// supplementary fields. Same ts format the heartbeat ships, so an
+// operator can correlate against the dashboard side-by-side.
+func printFsEventToStderr(e sandbox.FsEvent) {
+	var extra string
+	if e.Path2 != "" {
+		extra += " -> " + e.Path2
+	}
+	if e.Errno != 0 {
+		extra += fmt.Sprintf(" errno=%d", e.Errno)
+	}
+	if e.PID != 0 {
+		extra += fmt.Sprintf(" pid=%d", e.PID)
+	}
+	fmt.Fprintf(os.Stderr, "[greywall:fs] %-10s %s%s\n", e.Op, e.Path, extra)
 }
 
 // resolveProfile resolves a single profile name to a config.
@@ -1390,6 +1429,46 @@ profiles, first save a copy with --learning or copy the output of "profiles show
 
 	cmd.AddCommand(listCmd, showCmd, editCmd)
 	return cmd
+}
+
+// runSpawnEsloggerDetached implements the --spawn-eslogger-detached
+// internal mode. It starts `sudo eslogger ...` writing to logPath, prints
+// the sudo PID on stdout, and exits immediately so eslogger reparents to
+// launchd. Detaching eslogger from greywall's process tree is required
+// on macOS — Endpoint Security does not deliver events to a client about
+// processes that share its ancestor chain, which would otherwise hide
+// the wrapped command's filesystem activity.
+//
+// Stdin is inherited so sudo can find cached credentials by tty. sudo
+// is expected to use already-cached credentials (the parent runs
+// `sudo -v` before invoking this); a password prompt here will fail.
+func runSpawnEsloggerDetached(logPath string) {
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[greywall:spawn-eslogger] open log: %v\n", err)
+		os.Exit(1)
+	}
+
+	//nolint:gosec // sudo and eslogger paths hardcoded, event types are constants
+	cmd := exec.Command("/usr/bin/sudo", "-n", "/usr/bin/eslogger",
+		"open", "create", "write", "unlink", "truncate", "rename", "link", "fork")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = logFile
+	cmd.Stderr = os.Stderr
+	// New process group so the parent can later kill the whole tree by
+	// signaling -PGID without taking down our own session.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[greywall:spawn-eslogger] start: %v\n", err)
+		os.Exit(1)
+	}
+	_ = logFile.Close()
+
+	// Tell the parent which PID to reap later, then exit so the sudo
+	// subprocess (and its eslogger child) reparent to launchd.
+	fmt.Println(cmd.Process.Pid)
+	os.Exit(0)
 }
 
 // runLandlockWrapper runs in "wrapper mode" inside the sandbox.

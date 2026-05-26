@@ -5,6 +5,8 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 )
 
 // generateLearnedTemplatePlatform stops eslogger,
@@ -15,11 +17,20 @@ func (m *Manager) generateLearnedTemplatePlatform(cmdName string) (string, error
 		return "", fmt.Errorf("no eslogger log available (was learning mode enabled?)")
 	}
 
-	// Stop eslogger before parsing
-	if m.esloggerCmd != nil && m.esloggerCmd.Process != nil {
-		_ = m.esloggerCmd.Process.Signal(os.Interrupt)
-		_ = m.esloggerCmd.Wait()
-		m.esloggerCmd = nil
+	// Stop eslogger before parsing. It's detached (reparented to launchd),
+	// so we signal the process group and poll until it exits — we can't
+	// Wait() on a non-child. SIGTERM gives eslogger a chance to flush;
+	// fall back to SIGKILL after a short grace period.
+	if m.esloggerPid > 0 {
+		_ = syscall.Kill(-m.esloggerPid, syscall.SIGTERM)
+		for range 20 { // up to 1s
+			if syscall.Kill(m.esloggerPid, 0) != nil {
+				break // process gone
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = syscall.Kill(-m.esloggerPid, syscall.SIGKILL)
+		m.esloggerPid = 0
 	}
 
 	// Parse eslogger log with root PID for process tree tracking
