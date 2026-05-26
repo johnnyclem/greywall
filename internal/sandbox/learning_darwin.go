@@ -89,6 +89,17 @@ type esloggerForkEvent struct {
 	Child esloggerForkChild `json:"child"`
 }
 
+// esloggerExecEvent is emitted by ES when a process replaces its image
+// via execve / posix_spawn. The PID is unchanged (carried on the
+// top-level process.audit_token); target.executable.path is the new
+// binary the process became.
+type esloggerExecEvent struct {
+	Target struct {
+		AuditToken esloggerAuditToken `json:"audit_token"`
+		Executable esloggerExec       `json:"executable"`
+	} `json:"target"`
+}
+
 type esloggerForkChild struct {
 	AuditToken esloggerAuditToken `json:"audit_token"`
 	Executable esloggerExec       `json:"executable"`

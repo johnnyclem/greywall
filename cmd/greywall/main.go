@@ -1472,9 +1472,16 @@ func runSpawnEsloggerDetached(logPath string) {
 		os.Exit(1)
 	}
 
+	// `exec` is subscribed alongside the file-op set so we capture the
+	// moment a tracked PID swaps its binary (a fork'd claude child that
+	// then execs into /usr/bin/osascript, for example). Without it the
+	// post-exec activity is silently attributed to whatever the process
+	// used to be, which makes "why does claude open Input Methods
+	// bundles?" impossible to answer from the dashboard alone.
+	//
 	//nolint:gosec // sudo and eslogger paths hardcoded, event types are constants
 	cmd := exec.Command("/usr/bin/sudo", "-n", "/usr/bin/eslogger",
-		"open", "create", "write", "unlink", "truncate", "rename", "link", "fork")
+		"open", "create", "write", "unlink", "truncate", "rename", "link", "fork", "exec")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = logFile
 	cmd.Stderr = os.Stderr

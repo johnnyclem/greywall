@@ -326,6 +326,25 @@ func classifyEsloggerStreamingEvent(ev *esloggerEvent, name string) []FsEvent {
 			return nil
 		}
 		return []FsEvent{{Op: "link", Path: src, Path2: dst}}
+
+	case "exec":
+		// A process swapped its binary. PID stays the same; only the
+		// executable image changes. Surface this as an FsEvent in the
+		// same stream as opens/writes so the dashboard timeline shows
+		// the transition inline ("PID N became /usr/bin/osascript")
+		// right before the new binary's first reads. Without this an
+		// operator looking at activity attributed to a tracked PID has
+		// no way to know the running program is no longer what they
+		// think it is.
+		var ee esloggerExecEvent
+		if err := json.Unmarshal(eventRaw, &ee); err != nil {
+			return nil
+		}
+		path := ee.Target.Executable.Path
+		if path == "" || ee.Target.Executable.PathTruncated {
+			return nil
+		}
+		return []FsEvent{{Op: "exec", Path: path}}
 	}
 
 	return nil
