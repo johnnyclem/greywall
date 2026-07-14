@@ -345,3 +345,33 @@ func TestListAvailableProfiles(t *testing.T) {
 		}
 	}
 }
+
+func TestHypervaultProfileRegistered(t *testing.T) {
+	if got := profiles.IsKnownAgent("hypervault-mcp"); got != "hypervault" {
+		t.Errorf("IsKnownAgent(hypervault-mcp) = %q, want %q", got, "hypervault")
+	}
+	if !profiles.IsToolchain("hypervault") {
+		t.Error("hypervault should be a toolchain profile (composable, no BaseProfile merge)")
+	}
+
+	profile := profiles.GetAgentProfile("hypervault")
+	if profile == nil {
+		t.Fatal("GetAgentProfile(hypervault) returned nil")
+	}
+	if len(profile.Network.Rules) != 1 || profile.Network.Rules[0].Destination != "hypervault.store" {
+		t.Errorf("unexpected network rules: %+v", profile.Network.Rules)
+	}
+	foundSecret := false
+	for _, s := range profile.Credentials.Secrets {
+		if s == "HYPERVAULT_API_KEY" {
+			foundSecret = true
+		}
+	}
+	if !foundSecret {
+		t.Error("expected HYPERVAULT_API_KEY in credentials.secrets")
+	}
+	// The MCP server needs no filesystem grants of its own.
+	if len(profile.Filesystem.AllowWrite) != 0 {
+		t.Errorf("expected no write grants, got %v", profile.Filesystem.AllowWrite)
+	}
+}

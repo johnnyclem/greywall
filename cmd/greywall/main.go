@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -59,6 +60,7 @@ var (
 	allowReadPaths         []string
 	blankProfile           bool
 	watch                  bool
+	eventLogPath           string
 )
 
 func main() {
@@ -154,6 +156,7 @@ Configuration file format:
 	rootCmd.Flags().StringArrayVar(&allowReadPaths, "allow-read-path", nil, "Allow read-only access to a directory or file for this session (repeatable, e.g. --allow-read-path /data/refs)")
 	rootCmd.Flags().BoolVar(&blankProfile, "blank", false, "With --learning, skip default profile network rules (start from scratch)")
 	rootCmd.Flags().BoolVar(&watch, "watch", false, "Watch mode: skip profile loading, allow all network (logged on dashboard), permissive filesystem — observability only, no deny-by-default")
+	rootCmd.Flags().StringVar(&eventLogPath, "event-log", "", "Write machine-readable session events as NDJSON to this file, or one file per session if a directory (also: GREYWALL_EVENT_LOG)")
 
 	// Hidden aliases for backwards compatibility
 	rootCmd.Flags().StringVar(&profileName, "template", "", "Alias for --profile (deprecated)")
@@ -278,7 +281,9 @@ func runCommand(cmd *cobra.Command, args []string) error {
 				if resolved != nil {
 					cfg = config.Merge(cfg, resolved)
 				}
+				cfg = mergeMCPOverlay(cfg, name)
 			}
+			cfg = mergeMCPOverlay(cfg, cmdName)
 		} else if cmdName != "" {
 			// Auto-detect by command name
 			savedPath := sandbox.LearnedTemplatePath(cmdName)
@@ -291,6 +296,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 			case savedCfg != nil:
 				savedCfg = maybeResolveDrift(savedCfg, cmdName)
 				cfg = config.Merge(cfg, savedCfg)
+				cfg = mergeMCPOverlay(cfg, cmdName)
 				if debug {
 					fmt.Fprintf(os.Stderr, "[greywall] Auto-loaded saved profile for %q\n", cmdName)
 				}
@@ -303,6 +309,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 							fmt.Fprintf(os.Stderr, "[greywall] Warning: could not save profile: %v\n", saveErr)
 						}
 						cfg = config.Merge(cfg, profile)
+						cfg = mergeMCPOverlay(cfg, cmdName)
 						if debug {
 							fmt.Fprintf(os.Stderr, "[greywall] Auto-applied built-in profile for %q\n", cmdName)
 						}
@@ -434,6 +441,31 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[greywall] WARNING: The sandbox filesystem is relaxed during learning. Do not use for untrusted code.\n")
 	}
 
+	// One session ID per run, shared by the greyproxy session registration and
+	// the event stream so a consumer can correlate the two.
+	sessionID, sessionIDErr := sandbox.GenerateSessionID()
+	if sessionIDErr != nil && debug {
+		fmt.Fprintf(os.Stderr, "[greywall] failed to generate session ID: %v\n", sessionIDErr)
+	}
+
+	// Machine-readable event stream (NDJSON): --event-log or GREYWALL_EVENT_LOG.
+	if eventLogPath == "" {
+		eventLogPath = os.Getenv("GREYWALL_EVENT_LOG")
+	}
+	var evLog *sandbox.EventLog
+	if eventLogPath != "" && sessionID != "" {
+		evLog, err = sandbox.OpenEventLog(eventLogPath, sessionID, command)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[greywall:events] Warning: could not open event log: %v\n", err)
+			evLog = nil
+		} else {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[greywall:events] Writing session events to %s\n", evLog.Path())
+			}
+			defer func() { evLog.Close(exitCode) }()
+		}
+	}
+
 	manager := sandbox.NewManager(cfg, debug, monitor)
 	manager.SetExposedPorts(ports)
 	if learning {
@@ -450,9 +482,11 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	var logMonitor *sandbox.LogMonitor
-	if monitor {
+	if monitor || evLog != nil {
 		logMonitor = sandbox.NewLogMonitor(sandbox.GetSessionSuffix())
 		if logMonitor != nil {
+			logMonitor.SetEventLog(evLog)
+			logMonitor.SetEcho(monitor)
 			if err := logMonitor.Start(); err != nil {
 				fmt.Fprintf(os.Stderr, "[greywall] Warning: failed to start log monitor: %v\n", err)
 			} else {
@@ -555,12 +589,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	var stopHeartbeat func()
 	credSubstitutionActive := false
 	if !noCredentialProtection && !learning {
-		sessionID, err := sandbox.GenerateSessionID()
-		if err != nil {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[greywall:cred] failed to generate session ID: %v\n", err)
-			}
-		} else {
+		if sessionID != "" {
 			credSessionID = sessionID
 			detected, err := sandbox.DetectCredentials(hardenedEnv, sessionID, secretVars, ignoreVars)
 			if err != nil {
@@ -682,8 +711,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	// on credSubstitutionActive — which is the source of truth for whether
 	// registration actually happened.
 	if !credSubstitutionActive && (len(sessionNetworkRules) > 0 || learning) {
-		sessionID, err := sandbox.GenerateSessionID()
-		if err == nil {
+		if sessionID != "" {
 			credSessionID = sessionID
 			// Must match the SOCKS5 login (proxyUser) so greyproxy maps this
 			// session's network rules onto the sandbox's proxy connection.
@@ -740,6 +768,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	sandboxedCommand, err := manager.WrapCommand(command)
 	if err != nil {
+		var blocked *sandbox.CommandBlockedError
+		if errors.As(err, &blocked) {
+			evLog.Emit(sandbox.EventCommandBlock, blocked.Command, sandbox.VerdictDenied,
+				"matched deny rule: "+blocked.BlockedPrefix)
+		}
+		exitCode = 1
 		return fmt.Errorf("failed to wrap command: %w", err)
 	}
 
@@ -793,11 +827,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	// Start Linux monitors (eBPF tracing for filesystem violations)
 	var linuxMonitors *sandbox.LinuxMonitors
-	if monitor && execCmd.Process != nil {
+	if (monitor || evLog != nil) && execCmd.Process != nil {
 		linuxMonitors, _ = sandbox.StartLinuxMonitor(execCmd.Process.Pid, sandbox.LinuxSandboxOptions{
-			Monitor: true,
+			Monitor: monitor,
 			Debug:   debug,
 			UseEBPF: true,
+			Events:  evLog,
 		})
 		if linuxMonitors != nil {
 			defer linuxMonitors.Stop()
@@ -916,6 +951,24 @@ func resolveProfile(name string, debug bool) (*config.Config, error) {
 	}
 
 	return nil, fmt.Errorf("profile %q not found (no saved profile and no built-in profile)\nRun: greywall profiles list", name)
+}
+
+// mergeMCPOverlay folds config fragments derived from detected MCP servers
+// (e.g. hypervault-mcp in ~/.claude.json or .mcp.json) into cfg when name
+// resolves to a known agent. Toolchain profiles don't spawn MCP servers, so
+// they never pick up the overlay. Detection is cached process-wide, so
+// calling this from multiple profile paths is cheap and prints its notice
+// only once.
+func mergeMCPOverlay(cfg *config.Config, name string) *config.Config {
+	canonical := profiles.IsKnownAgent(name)
+	if canonical == "" || profiles.IsToolchain(canonical) {
+		return cfg
+	}
+	overlay := profiles.DetectMCPOverlay()
+	if overlay == nil {
+		return cfg
+	}
+	return config.Merge(cfg, overlay)
 }
 
 // proxyIdentity returns the identity used both as the SOCKS5 login injected

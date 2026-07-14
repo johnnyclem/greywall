@@ -66,6 +66,7 @@ type LinuxSandboxOptions struct {
 	StraceLogPath     string
 	RewrittenEnvFiles map[string]string
 	AllowAudio        bool
+	Events            *EventLog
 }
 
 // NewProxyBridge returns an error on non-Linux platforms.

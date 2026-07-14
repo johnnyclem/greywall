@@ -138,6 +138,9 @@ type LinuxSandboxOptions struct {
 	// can produce audio output. Disabled by default because these sockets also
 	// allow microphone capture and (via PipeWire) camera/screen access.
 	AllowAudio bool
+	// Events is an optional machine-readable event stream. When set, monitors
+	// record violations on it even if Monitor (stderr echo) is disabled.
+	Events *EventLog
 }
 
 // NewProxyBridge creates a Unix socket bridge to an external SOCKS5 proxy.
@@ -1686,8 +1689,10 @@ func StartLinuxMonitor(pid int, opts LinuxSandboxOptions) (*LinuxMonitors, error
 
 	// Start eBPF monitor if available and requested
 	// This monitors syscalls that return EACCES/EPERM for sandbox descendants
-	if opts.Monitor && opts.UseEBPF && features.HasEBPF {
+	if (opts.Monitor || opts.Events != nil) && opts.UseEBPF && features.HasEBPF {
 		ebpfMon := NewEBPFMonitor(pid, opts.Debug)
+		ebpfMon.SetEventLog(opts.Events)
+		ebpfMon.SetEcho(opts.Monitor)
 		if err := ebpfMon.Start(); err != nil {
 			if opts.Debug {
 				fmt.Fprintf(os.Stderr, "[greywall:linux] Failed to start eBPF monitor: %v\n", err)

@@ -143,5 +143,6 @@ This prevents a sandboxed process from reading the key material needed to decryp
 ## Limitations
 
 - Credential detection is heuristic-based. Use `--secret` for any variables the auto-detection misses.
+- **Substitution implies the proxy sees plaintext.** To swap a placeholder for the real value inside an HTTPS request, greyproxy terminates TLS with its local CA and re-encrypts upstream (a deliberate, local machine-in-the-middle). On substituted paths the real credential — and the request around it — is visible to greyproxy in plaintext. This is by design and stays on your machine, but it's worth knowing when reasoning about what can observe a secret.
 - Body substitution is not supported. An API that accepts credentials in the request body (rather than headers) will receive the placeholder string instead of the real secret.
 - On macOS, `.env` file rewriting is not supported for most binaries, so `.env` files are denied entirely. See the section above for the workaround.

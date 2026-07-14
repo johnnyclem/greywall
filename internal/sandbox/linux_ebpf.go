@@ -23,7 +23,9 @@ type EBPFMonitor struct {
 	cancel     context.CancelFunc
 	running    bool
 	cmd        *exec.Cmd
-	scriptPath string // Path to bpftrace script (for cleanup)
+	scriptPath string    // Path to bpftrace script (for cleanup)
+	echo       bool      // print violations to stderr
+	events     *EventLog // optional machine-readable event stream
 }
 
 // NewEBPFMonitor creates a new eBPF-based violation monitor.
@@ -31,7 +33,18 @@ func NewEBPFMonitor(pid int, debug bool) *EBPFMonitor {
 	return &EBPFMonitor{
 		pid:   pid,
 		debug: debug,
+		echo:  true,
 	}
+}
+
+// SetEventLog attaches a machine-readable event stream to the monitor.
+func (m *EBPFMonitor) SetEventLog(l *EventLog) {
+	m.events = l
+}
+
+// SetEcho controls whether violations are printed to stderr.
+func (m *EBPFMonitor) SetEcho(echo bool) {
+	m.echo = echo
 }
 
 // Start begins eBPF-based monitoring of filesystem and network violations.
@@ -138,9 +151,19 @@ func (m *EBPFMonitor) tryBpftrace(ctx context.Context) error {
 			if m.debug {
 				fmt.Fprintf(os.Stderr, "[greywall:ebpf:trace] %s\n", line) //nolint:gosec // stderr output
 			}
-			if violation := m.parseBpftraceOutput(line); violation != "" {
-				fmt.Fprintf(os.Stderr, "%s\n", violation) //nolint:gosec // stderr output
+			v := parseBpftraceLine(line)
+			if v == nil {
+				continue
 			}
+			if m.echo {
+				fmt.Fprintf(os.Stderr, "%s\n", v.format()) //nolint:gosec // stderr output
+			}
+			kind := EventFsViolation
+			if v.syscall == "connect" {
+				kind = EventNetworkAttempt
+			}
+			m.events.Emit(kind, v.comm+":"+v.syscall, VerdictDenied,
+				fmt.Sprintf("%s (pid=%d)", getErrnoName(v.ret), v.pid))
 		}
 	}()
 
@@ -205,30 +228,44 @@ tracepoint:syscalls:sys_exit_connect
 	return script
 }
 
-// parseBpftraceOutput parses bpftrace output and formats violations.
-func (m *EBPFMonitor) parseBpftraceOutput(line string) string {
-	if !strings.HasPrefix(line, "DENIED:") {
-		return ""
-	}
+// bpfViolation is a parsed denial from the bpftrace output stream.
+type bpfViolation struct {
+	syscall string
+	pid     int
+	comm    string
+	ret     int
+}
 
-	// Parse: DENIED:syscall pid=X comm=Y ret=Z
-	pattern := regexp.MustCompile(`DENIED:(\w+) pid=(\d+) comm=(\S+) ret=(-?\d+)`)
-	matches := pattern.FindStringSubmatch(line)
-	if matches == nil {
-		return ""
-	}
-
-	syscall := matches[1]
-	pid, _ := strconv.Atoi(matches[2])
-	comm := matches[3]
-	ret, _ := strconv.Atoi(matches[4])
-
-	// Format the violation
-	errorName := getErrnoName(ret)
+// format renders a violation for human-readable stderr output.
+func (v *bpfViolation) format() string {
 	timestamp := time.Now().Format("15:04:05")
-
 	return fmt.Sprintf("[greywall:ebpf] %s ✗ %s: %s (%s, pid=%d)",
-		timestamp, syscall, errorName, comm, pid)
+		timestamp, v.syscall, getErrnoName(v.ret), v.comm, v.pid)
+}
+
+// bpfDeniedPattern matches lines like: DENIED:syscall pid=X comm=Y ret=Z
+var bpfDeniedPattern = regexp.MustCompile(`DENIED:(\w+) pid=(\d+) comm=(\S+) ret=(-?\d+)`)
+
+// parseBpftraceLine parses one line of bpftrace output.
+// Returns nil for non-violation lines.
+func parseBpftraceLine(line string) *bpfViolation {
+	if !strings.HasPrefix(line, "DENIED:") {
+		return nil
+	}
+
+	matches := bpfDeniedPattern.FindStringSubmatch(line)
+	if matches == nil {
+		return nil
+	}
+
+	pid, _ := strconv.Atoi(matches[2])
+	ret, _ := strconv.Atoi(matches[4])
+	return &bpfViolation{
+		syscall: matches[1],
+		pid:     pid,
+		comm:    matches[3],
+		ret:     ret,
+	}
 }
 
 // traceWithPerfEvents uses perf events for tracing (fallback when bpftrace unavailable).

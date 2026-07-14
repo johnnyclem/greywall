@@ -28,6 +28,7 @@ greywall <subcommand> [args...]
 | `--command <cmd>` | `-c` | Run a shell command string (supports `&&`, `;`, pipes) |
 | `--debug` | `-d` | Verbose output: proxy activity, filter decisions, sandbox command |
 | `--monitor` | `-m` | Show only violations and blocked requests (audit mode) |
+| `--event-log <path>` | | Write machine-readable session events as NDJSON to a file, or one file per session if `<path>` is a directory. See [Event Stream](./events). |
 | `--learning` | | Trace filesystem access with strace/eslogger and auto-generate a profile |
 | `--allow-path <path>` | | Grant read+write access to a directory **or** file for this session only (repeatable). Nothing is persisted. See [below](#--allow-path-and---allow-read-path). |
 | `--allow-read-path <path>` | | Grant read-only access to a directory **or** file for this session only (repeatable). Nothing is persisted. |
@@ -181,6 +182,7 @@ greywall profiles edit opencode
 | Variable | Description |
 |----------|-------------|
 | `GREYWALL_SANDBOX` | Set to `1` inside sandboxed processes. Lets commands detect they are running under greywall. |
+| `GREYWALL_EVENT_LOG` | Path for the NDJSON event stream; equivalent to `--event-log` (the flag wins when both are set). See [Event Stream](./events). |
 | `GREYWALL_TEST_NETWORK` | Set to `1` in smoke tests to enable network-dependent tests. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Set by greywall to point to the local HTTP proxy (macOS and Linux fallback mode). |
 | `ALL_PROXY` | Set by greywall to point to the SOCKS5 proxy. |
