@@ -67,6 +67,15 @@ func ResolveFirstRun(cmdName string, hasTemplate bool, debug bool) (*config.Conf
 		return nil, nil
 	}
 
+	// Fold in config fragments for MCP servers configured for this agent
+	// (e.g. hypervault-mcp) so the recommendation covers them and the prompt
+	// shows their network rules.
+	if !IsToolchain(canonical) {
+		if overlay := DetectMCPOverlay(); overlay != nil {
+			profile = config.Merge(profile, overlay)
+		}
+	}
+
 	response := PromptFirstRun(cmdName, profile, os.Stderr, os.Stdin)
 
 	switch response {

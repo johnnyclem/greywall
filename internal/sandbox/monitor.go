@@ -19,6 +19,8 @@ type LogMonitor struct {
 	cmd           *exec.Cmd
 	cancel        context.CancelFunc
 	running       bool
+	echo          bool      // print violations to stderr
+	events        *EventLog // optional machine-readable event stream
 }
 
 // NewLogMonitor creates a new log monitor for the given session suffix.
@@ -29,6 +31,21 @@ func NewLogMonitor(sessionSuffix string) *LogMonitor {
 	}
 	return &LogMonitor{
 		sessionSuffix: sessionSuffix,
+		echo:          true,
+	}
+}
+
+// SetEventLog attaches a machine-readable event stream to the monitor.
+func (m *LogMonitor) SetEventLog(l *EventLog) {
+	if m != nil {
+		m.events = l
+	}
+}
+
+// SetEcho controls whether violations are printed to stderr.
+func (m *LogMonitor) SetEcho(echo bool) {
+	if m != nil {
+		m.echo = echo
 	}
 }
 
@@ -66,9 +83,23 @@ func (m *LogMonitor) Start() error {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if violation := parseViolation(line); violation != "" {
-				fmt.Fprintf(os.Stderr, "%s\n", violation) //nolint:gosec // stderr output
+			v := parseViolationLine(line)
+			if v == nil {
+				continue
 			}
+			if m.echo {
+				fmt.Fprintf(os.Stderr, "%s\n", v.format()) //nolint:gosec // stderr output
+			}
+			kind := EventFsViolation
+			if strings.HasPrefix(v.operation, "network-") {
+				kind = EventNetworkAttempt
+			}
+			target := v.details
+			if target == "" {
+				target = v.operation
+			}
+			m.events.Emit(kind, target, VerdictDenied,
+				fmt.Sprintf("%s (%s:%s)", v.operation, v.process, v.pid))
 		}
 	}()
 
@@ -102,46 +133,60 @@ func (m *LogMonitor) Stop() {
 // violationPattern matches sandbox denial log entries
 var violationPattern = regexp.MustCompile(`Sandbox: (\w+)\((\d+)\) deny\(\d+\) (\S+)(.*)`)
 
-// parseViolation extracts and formats a sandbox violation from a log line.
-// Returns empty string if the line should be filtered out.
-func parseViolation(line string) string {
+// macViolation is a parsed sandbox denial from the macOS unified log.
+type macViolation struct {
+	process   string
+	pid       string
+	operation string
+	details   string
+}
+
+// format renders a violation for human-readable stderr output.
+func (v *macViolation) format() string {
+	timestamp := time.Now().Format("15:04:05")
+	if v.details != "" {
+		return fmt.Sprintf("[greywall:logstream] %s ✗ %s %s (%s:%s)", timestamp, v.operation, v.details, v.process, v.pid)
+	}
+	return fmt.Sprintf("[greywall:logstream] %s ✗ %s (%s:%s)", timestamp, v.operation, v.process, v.pid)
+}
+
+// parseViolationLine extracts a sandbox violation from a log line.
+// Returns nil if the line should be filtered out.
+func parseViolationLine(line string) *macViolation {
 	if strings.HasPrefix(line, "Filtering") || strings.HasPrefix(line, "Timestamp") {
-		return ""
+		return nil
 	}
 
 	if strings.Contains(line, "duplicate report") {
-		return ""
+		return nil
 	}
 
 	if strings.HasPrefix(line, "CMD64_") {
-		return ""
+		return nil
 	}
 
 	// Match violation pattern
 	matches := violationPattern.FindStringSubmatch(line)
 	if matches == nil {
-		return ""
+		return nil
 	}
 
-	process := matches[1]
-	pid := matches[2]
-	operation := matches[3]
-	details := strings.TrimSpace(matches[4])
-
-	if !shouldShowViolation(operation) {
-		return ""
+	v := &macViolation{
+		process:   matches[1],
+		pid:       matches[2],
+		operation: matches[3],
+		details:   strings.TrimSpace(matches[4]),
 	}
 
-	if isNoisyViolation(details) {
-		return ""
+	if !shouldShowViolation(v.operation) {
+		return nil
 	}
 
-	timestamp := time.Now().Format("15:04:05")
-
-	if details != "" {
-		return fmt.Sprintf("[greywall:logstream] %s ✗ %s %s (%s:%s)", timestamp, operation, details, process, pid)
+	if isNoisyViolation(v.details) {
+		return nil
 	}
-	return fmt.Sprintf("[greywall:logstream] %s ✗ %s (%s:%s)", timestamp, operation, process, pid)
+
+	return v
 }
 
 // shouldShowViolation returns true if this violation type should be displayed.

@@ -170,6 +170,7 @@ See [Platform Support](/greywall/platform-support) for a full comparison.
 - [Configuration](/greywall/configuration) — Full configuration reference
 - [Learning Mode](/greywall/learning-mode) — Auto-discover filesystem access needs
 - [AI Agent Integration](/greywall/agents) — Defense-in-depth for coding agents
+- [Event Stream](/greywall/events) — Machine-readable NDJSON session events
 - [Security Model](/greywall/security-model) — Threat model and guarantees
 - [Platform Support](/greywall/platform-support) — Linux vs macOS details
 - [Troubleshooting](/greywall/troubleshooting) — Common issues and fixes
